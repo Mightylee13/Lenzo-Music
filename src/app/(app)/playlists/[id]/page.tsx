@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { MoreVertical, Music4, Pencil, Play, Shuffle } from "lucide-react";
+import { ChevronLeft, MoreVertical, Music4, Pencil, Play, Shuffle } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
 import TrackList from "@/components/tracks/TrackList";
 import { EmptyState, ErrorState, TrackListSkeleton } from "@/components/ui/skeletons";
@@ -23,6 +23,7 @@ export default function PlaylistDetailPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: "", description: "", public: false, collaborative: false });
+  const shuffleOn = usePlayerStore((s) => s.shuffle);
 
   const playlist = data?.playlist;
   const isOwner = data?.isOwner ?? false;
@@ -53,6 +54,19 @@ export default function PlaylistDetailPage() {
 
   return (
     <div className="flex flex-col gap-6 animate-fade-in">
+      {/* Back */}
+      <button
+        type="button"
+        onClick={() => (history.length > 1 ? router.back() : router.push("/playlists"))}
+        aria-label="Go back"
+        className="flex w-fit items-center gap-1.5 text-xs font-semibold text-muted transition hover:text-ink"
+      >
+        <span className="grid size-9 place-items-center rounded-full border border-hairline bg-card">
+          <ChevronLeft className="size-4" />
+        </span>
+        Back
+      </button>
+
       {/* Header */}
       <header className="relative flex flex-col gap-5 md:flex-row md:items-end">
         <Artwork
@@ -79,7 +93,9 @@ export default function PlaylistDetailPage() {
               <>
                 <button
                   type="button"
-                  onClick={() => usePlayerStore.getState().playQueue(playlist.tracks, 0)}
+                  onClick={() =>
+                    usePlayerStore.getState().playQueue(playlist.tracks, 0)
+                  }
                   className="flex items-center gap-2 rounded-pill bg-white px-6 py-3 text-sm font-bold text-bg shadow-lg transition hover:scale-[1.02]"
                 >
                   <Play className="size-4 fill-current" /> Play
@@ -87,13 +103,18 @@ export default function PlaylistDetailPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    const store = usePlayerStore.getState();
-                    if (!store.shuffle) store.toggleShuffle();
-                    store.playQueue(playlist.tracks, Math.floor(Math.random() * playlist.tracks.length));
+                    // Shuffle only flips the MODE (colour shows it's on).
+                    // Pressing Play then starts a random song.
+                    usePlayerStore.getState().toggleShuffle();
                   }}
-                  className="flex items-center gap-2 rounded-pill border border-hairline px-5 py-3 text-sm font-bold text-ink transition hover:bg-white/6"
+                  className={`flex items-center gap-2 rounded-pill border px-5 py-3 text-sm font-bold transition ${
+                    shuffleOn
+                      ? "border-cyan/60 bg-cyan/10 text-cyan"
+                      : "border-hairline text-ink hover:bg-white/6"
+                  }`}
+                  aria-pressed={shuffleOn}
                 >
-                  <Shuffle className="size-4" /> Shuffle
+                  <Shuffle className="size-4" /> Shuffle{shuffleOn ? " on" : ""}
                 </button>
               </>
             )}

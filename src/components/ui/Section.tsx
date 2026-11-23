@@ -14,10 +14,11 @@ interface SectionProps {
   href?: string;
   children: React.ReactNode;
   className?: string;
-  /** Grid of cards instead of a scroller (mobile home style). */
+  /** "grid" renders a compact tiled grid (like the Library) instead of a carousel. */
+  variant?: "carousel" | "grid";
 }
 
-export default function Section({ title, href, children, className = "" }: SectionProps) {
+export default function Section({ title, href, children, className = "", variant = "carousel" }: SectionProps) {
   const scroller = useRef<HTMLDivElement | null>(null);
   const [canScroll, setCanScroll] = useState({ left: false, right: false });
 
@@ -31,6 +32,7 @@ export default function Section({ title, href, children, className = "" }: Secti
   };
 
   useEffect(() => {
+    if (variant !== "carousel") return;
     update();
     const el = scroller.current;
     if (!el) return;
@@ -40,7 +42,7 @@ export default function Section({ title, href, children, className = "" }: Secti
       el.removeEventListener("scroll", update);
       window.removeEventListener("resize", update);
     };
-  }, [children]);
+  }, [children, variant]);
 
   const page = (dir: 1 | -1) => {
     const el = scroller.current;
@@ -65,6 +67,9 @@ export default function Section({ title, href, children, className = "" }: Secti
           )}
         </div>
       )}
+      {variant === "grid" ? (
+        <div className="grid grid-cols-3 gap-3 md:grid-cols-5 md:gap-4 lg:grid-cols-6">{children}</div>
+      ) : (
       <div className="relative">
         <div
           ref={scroller}
@@ -93,6 +98,7 @@ export default function Section({ title, href, children, className = "" }: Secti
           </button>
         )}
       </div>
+      )}
     </section>
   );
 }

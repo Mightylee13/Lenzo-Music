@@ -21,6 +21,7 @@ export default function AlbumPage() {
   const id = params?.id ?? "";
   const { data, loading, error, reload } = useApi<Payload>(id ? `/api/music/album/${encodeURIComponent(id)}` : null);
   const session = useSession();
+  const shuffleOn = usePlayerStore((s) => s.shuffle);
 
   if (loading) return <div className="animate-fade-in"><BannerSkeleton /></div>;
   if (error)
@@ -88,13 +89,18 @@ export default function AlbumPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    const store = usePlayerStore.getState();
-                    if (!store.shuffle) store.toggleShuffle();
-                    store.playQueue(tracks, Math.floor(Math.random() * tracks.length));
+                    // Shuffle only flips the MODE (colour shows it's on).
+                    // Pressing Play then starts a random song.
+                    usePlayerStore.getState().toggleShuffle();
                   }}
-                  className="flex items-center gap-2 rounded-pill border border-hairline px-5 py-3 text-sm font-bold text-ink transition hover:bg-white/6"
+                  className={`flex items-center gap-2 rounded-pill border px-5 py-3 text-sm font-bold transition ${
+                    shuffleOn
+                      ? "border-cyan/60 bg-cyan/10 text-cyan"
+                      : "border-hairline text-ink hover:bg-white/6"
+                  }`}
+                  aria-pressed={shuffleOn}
                 >
-                  <Shuffle className="size-4" /> Shuffle
+                  <Shuffle className="size-4" /> Shuffle{shuffleOn ? " on" : ""}
                 </button>
               </>
             )}

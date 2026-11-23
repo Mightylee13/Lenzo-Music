@@ -89,8 +89,8 @@ function RemoteSection({ id, title }: { id: string; title: string }) {
     return (
       <section>
         <h2 className="mb-3 text-sm font-bold text-ink">{title}</h2>
-        <div className="flex gap-3 overflow-hidden">
-          <CardSkeleton count={5} />
+        <div className="grid grid-cols-3 gap-3 md:grid-cols-5 lg:grid-cols-6">
+          <CardSkeleton count={6} />
         </div>
       </section>
     );
@@ -112,7 +112,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             title={track.title}
             subtitle={track.artist}
             onPlay={() => usePlayerStore.getState().playTrack(track, payload.tracks ?? [])}
-            className="w-[84px] shrink-0 snap-start md:w-[144px]"
+           
           />
         ))}
       </RenderSection>
@@ -131,7 +131,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             subtitle={`Playlist · ${pl.owner}`}
             badge="Playlist"
             href={`/playlists/${pl.id}`}
-            className="w-[84px] shrink-0 snap-start md:w-[144px]"
+           
           />
         ))}
       </RenderSection>
@@ -150,7 +150,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             subtitle={`${al.artist}${al.year ? ` · ${al.year}` : ""}`}
             badge={albumTypeLabel(al.type)}
             href={`/albums/${al.id}`}
-            className="w-[84px] shrink-0 snap-start md:w-[144px]"
+           
           />
         ))}
       </RenderSection>
@@ -170,7 +170,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             badge="Artist"
             round
             href={`/artists/${ar.id}`}
-            className="w-[64px] shrink-0 snap-start md:w-[112px]"
+           
           />
         ))}
       </RenderSection>
@@ -187,7 +187,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             title={`#${i + 1} ${track.title}`}
             subtitle={track.artist}
             onPlay={() => usePlayerStore.getState().playTrack(track, arr)}
-            className="w-[84px] shrink-0 snap-start md:w-[144px]"
+           
           />
         ))}
       </RenderSection>
@@ -198,7 +198,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
 
 function RenderSection({ title, href, children }: { title: string; href?: string; children: React.ReactNode }) {
   return (
-    <Section title={title} href={href}>
+    <Section title={title} href={href} variant="grid">
       {children}
     </Section>
   );
@@ -229,7 +229,7 @@ function FeaturedHero({ playlist }: { playlist: Playlist }) {
           src={playlist.artwork}
           alt=""
           loading="lazy"
-          className="size-24 shrink-0 rounded-xl object-cover shadow-lg shadow-black/50 md:size-36"
+          className="size-20 shrink-0 rounded-xl object-cover shadow-lg shadow-black/50 md:size-32"
         />
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-cyan">Featured playlist</p>

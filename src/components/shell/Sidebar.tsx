@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
   Compass,
@@ -64,6 +64,7 @@ const NAV_LIBRARY = [
 
 export default function Sidebar({ collapsed }: SidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const user = useSession((s) => s.user);
   const app = useSession((s) => s.app);
   const likedCount = useSession((s) => s.library.likedTracks.length);
@@ -75,6 +76,13 @@ export default function Sidebar({ collapsed }: SidebarProps) {
       <Link
         href={href}
         title={label}
+        onClick={() => {
+          if (href !== "/search" || pathname.startsWith("/search")) return;
+          try {
+            const last = sessionStorage.getItem("lenzo.search.last");
+            if (last) router.push(`/search?q=${encodeURIComponent(last)}`);
+          } catch { /* private mode */ }
+        }}
         className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-all duration-150 ${
           active ? "bg-white/8 text-ink" : "text-muted hover:bg-white/4 hover:text-ink"
         } ${collapsed ? "justify-center px-0" : ""}`}

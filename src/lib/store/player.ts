@@ -264,6 +264,9 @@ function updateMediaSession(track: Track, resolved: ResolvedAudio | null) {
         { src: resolved?.artwork ?? track.artwork, sizes: "512x512", type: "image/jpeg" },
       ],
     });
+    // iOS quirk (esp. standalone PWA): assigning metadata can drop the
+    // action handlers — always re-arm AFTER the metadata is set.
+    installMediaSessionHandlers();
     navigator.mediaSession.playbackState = "playing";
   } catch {
     /* unsupported */
@@ -462,12 +465,24 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     });
 
     installMediaSessionHandlers();
+
+    // Standalone PWAs (iOS, Android) can drop media-session handlers when
+    // the app is backgrounded/resumed. Re-arm on every visibility change —
+    // cheap, and the handlers close over getState() only.
+    document.addEventListener("visibilitychange", () => {
+      installMediaSessionHandlers();
+    });
   },
 
   playQueue: (tracks, startIndex = 0) => {
     if (!tracks.length) return;
-    const ordered = get().shuffle && tracks.length > 1 ? reorder(tracks, startIndex) : tracks;
-    const idx = get().shuffle && tracks.length > 1 ? 0 : startIndex;
+    // Shuffle ON + Play = start a RANDOM song (Spotify behaviour), then
+    // continue through the rest shuffled. The shuffle toggle itself never
+    // starts playback.
+    const randomized = get().shuffle && tracks.length > 1;
+    const start = randomized ? Math.floor(Math.random() * tracks.length) : startIndex;
+    const ordered = randomized ? reorder(tracks, start) : tracks;
+    const idx = randomized ? start : startIndex;
     void startTrack(ordered[idx], ordered, idx);
   },
 

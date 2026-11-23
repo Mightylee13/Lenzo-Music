@@ -61,6 +61,7 @@ export default function ArtistPage() {
 
   const following = session.isFollowingArtist(artist.id);
   const tracks = data?.tracks ?? [];
+  const shuffleOn = usePlayerStore((s) => s.shuffle);
   const albums = data?.albums ?? [];
 
   // Real collaborators: other artist names credited on this artist's tracks.
@@ -122,13 +123,12 @@ export default function ArtistPage() {
             {tracks.length > 1 && (
               <button
                 type="button"
-                aria-label="Shuffle artist"
-                onClick={() => {
-                  const store = usePlayerStore.getState();
-                  if (!store.shuffle) store.toggleShuffle();
-                  store.playQueue(tracks, Math.floor(Math.random() * tracks.length));
-                }}
-                className="grid size-11 place-items-center rounded-full border border-hairline text-ink transition hover:bg-white/6"
+                aria-label={shuffleOn ? "Shuffle on" : "Shuffle artist"}
+                aria-pressed={shuffleOn}
+                onClick={() => usePlayerStore.getState().toggleShuffle()}
+                className={`grid size-11 place-items-center rounded-full border transition ${
+                  shuffleOn ? "border-cyan/60 bg-cyan/10 text-cyan" : "border-hairline text-ink hover:bg-white/6"
+                }`}
               >
                 <Shuffle className="size-4" />
               </button>

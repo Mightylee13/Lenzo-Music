@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ChevronDown,
@@ -79,7 +80,6 @@ function Expanded({
   const store = usePlayerStore.getState();
   const session = useSession();
   const [drawerTab, setDrawerTab] = useState<"now" | "lyrics" | "queue">("lyrics");
-  const [lyricsOpen, setLyricsOpen] = useState(false);
   const lyricsAnchor = useRef<HTMLDivElement | null>(null);
 
   if (!current) return null;
@@ -349,25 +349,23 @@ function Expanded({
 
         {/* ---- Mobile-only scroll sections ---- */}
         <div className="flex flex-col gap-10 pb-6 md:hidden">
-          {/* Lyrics — the full lyrics live here (tap a line to seek). The
-              box is capped so it doesn't dominate; expand for the page-long
-              view without leaving the player. */}
+          {/* Lyrics — short preview here (tap a line to seek); the button
+              opens the full lyrics page, which has its own transport. */}
           <section ref={lyricsAnchor} className="scroll-mt-20">
             <div className="mb-2 flex items-center justify-between">
               <h3 className="text-base font-extrabold text-ink">Lyrics</h3>
               <button
                 type="button"
-                onClick={() => setLyricsOpen((v) => !v)}
-                className="rounded-full px-3 py-1 text-[11px] font-bold text-muted hover:bg-white/8 hover:text-ink"
+                onClick={() => router.push("/lyrics")}
+                className="flex items-center gap-1 rounded-full px-3 py-1 text-[11px] font-bold text-muted hover:bg-white/8 hover:text-ink"
               >
-                {lyricsOpen ? "Show less" : "Full lyrics"}
+                Show lyrics
+                <ChevronDown className="size-3.5 rotate-[-90deg]" aria-hidden />
               </button>
             </div>
-            <div className={`rounded-2xl border border-white/8 bg-white/4 ${lyricsOpen ? "" : "relative max-h-64 overflow-hidden"}`}>
-              <LyricsView variant="panel" className={`rounded-2xl ${lyricsOpen ? "max-h-[70vh]" : "max-h-64"}`} />
-              {!lyricsOpen && (
-                <span className="pointer-events-none absolute inset-x-0 bottom-0 h-16 rounded-b-2xl bg-gradient-to-t from-bg to-transparent" />
-              )}
+            <div className="relative max-h-64 overflow-hidden rounded-2xl border border-white/8 bg-white/4">
+              <LyricsView variant="panel" className="max-h-64 rounded-2xl" />
+              <span className="pointer-events-none absolute inset-x-0 bottom-0 h-16 rounded-b-2xl bg-gradient-to-t from-bg to-transparent" />
             </div>
           </section>
 
@@ -489,11 +487,11 @@ function MobileArtistSections({ current }: { current: Track }) {
           {ownAlbums.length > 0 && (
             <div className="mt-3 flex gap-3 overflow-x-auto pb-1 hide-scrollbar">
               {ownAlbums.slice(0, 10).map((al) => (
-                <a key={al.id} href={`/albums/${encodeURIComponent(al.id)}`} className="group w-24 shrink-0">
+                <Link key={al.id} href={`/albums/${encodeURIComponent(al.id)}`} className="group w-24 shrink-0">
                   <Artwork src={al.artwork} seed={al.id} label={al.title} alt="" className="aspect-square w-full rounded-lg object-cover shadow-md shadow-black/40" />
                   <span className="mt-1.5 block truncate text-[12px] font-semibold text-ink">{al.title}</span>
                   <span className="block truncate text-[11px] text-muted">{al.year ?? ""}</span>
-                </a>
+                </Link>
               ))}
             </div>
           )}

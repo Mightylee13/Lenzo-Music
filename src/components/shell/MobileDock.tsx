@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Pause, Play, SkipForward } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
 import { usePlayerStore } from "@/lib/store/player";
@@ -23,6 +23,7 @@ const TABS = [
 
 export function BottomNav() {
   const pathname = usePathname();
+  const router = useRouter();
   return (
     <nav
       className="fixed inset-x-0 bottom-0 z-50 grid grid-cols-5 border-t border-white/6 glass-strong pb-[env(safe-area-inset-bottom)] md:hidden"
@@ -34,6 +35,17 @@ export function BottomNav() {
           <Link
             key={tab.href}
             href={tab.href}
+            // Re-entering Search restores the last query straight into the
+            // URL, so the results view is back before the first paint.
+            onClick={() => {
+              if (tab.href !== "/search") return;
+              try {
+                const last = sessionStorage.getItem("lenzo.search.last");
+                if (last && !pathname.startsWith("/search")) {
+                  router.push(`/search?q=${encodeURIComponent(last)}`);
+                }
+              } catch { /* private mode */ }
+            }}
             className="flex flex-col items-center gap-1 py-2.5 active:scale-95 transition-transform"
           >
             <svg viewBox="0 0 24 24" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={`size-[22px] ${active ? "text-cyan" : "text-muted"}`} aria-hidden>
