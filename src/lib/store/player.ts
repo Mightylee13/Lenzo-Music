@@ -121,7 +121,9 @@ async function maybePreloadNext(): Promise<void> {
     const resolved = await resolveAudio(nextTrack);
     preloadEl = new Audio();
     preloadEl.preload = "auto";
-    preloadEl.src = resolved.audioUrl;
+    // Through the proxy so the service worker stores the bytes on the
+    // device while it preloads — the song is cached before it even plays.
+    preloadEl.src = audioSourceFor(resolved, nextTrack.id);
     preloadEl.load();
   } catch {
     preloadKey = null; // unresolvable — let the normal skip path handle it
@@ -178,6 +180,25 @@ export async function prefetchTracks(tracks: Track[], count = 2): Promise<void> 
       prefetching.delete(track.id);
     }
   }
+}
+
+/**
+ * Route playback through our stream proxy tagged with the track id.
+ * The service worker keys its device cache on `tid`, so a song stays
+ * one cache entry for its whole life even though resolved CDN links
+ * (signed, expiring) change between plays. Replays are then served
+ * from the device — instant, and offline-capable.
+ */
+function audioSourceFor(resolved: ResolvedAudio, trackId: string): string {
+  const url = resolved.audioUrl;
+  if (!url || /^(blob:|data:)/.test(url)) return url;
+  if (url.startsWith("/api/music/stream")) {
+    // The server pre-proxies range-hostile sources — just tag the track id.
+    const tagged = new URL(url, "http://local");
+    tagged.searchParams.set("tid", trackId);
+    return tagged.pathname + tagged.search;
+  }
+  return `/api/music/stream?url=${encodeURIComponent(url)}&tid=${encodeURIComponent(trackId)}`;
 }
 
 function loadSource(url: string, autoplay: boolean) {
@@ -249,7 +270,7 @@ async function startTrack(track: Track, queue: Track[], index: number) {
     usePlayerStore.setState({ resolved, lyrics: resolved.lyrics ?? null });
     if (resolved.duration) usePlayerStore.setState({ duration: resolved.duration });
 
-    loadSource(resolved.audioUrl, true);
+    loadSource(audioSourceFor(resolved, track.id), true);
     usePlayerStore.setState({ status: "playing", isPlaying: true });
 
     updateMediaSession(track, resolved);

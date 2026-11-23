@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { consumePasswordReset } from "@/lib/auth/session";
 import { setPasswordHash } from "@/lib/db/users";
 import { hashPassword } from "@/lib/auth/password";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 export async function POST(request: Request) {
+  await ensureDbLoaded();
   const body = (await request.json().catch(() => null)) as
     | { token?: string; password?: string }
     | null;

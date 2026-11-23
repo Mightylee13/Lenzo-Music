@@ -9,8 +9,10 @@ import {
 import { testConnection } from "@/lib/api/music";
 import { callUpstream } from "@/lib/api/client";
 import { readDb } from "@/lib/db/json-store";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 export async function GET() {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 
@@ -23,6 +25,7 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 
@@ -44,6 +47,7 @@ export async function PATCH(request: Request) {
 }
 
 export async function POST(request: Request) {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 

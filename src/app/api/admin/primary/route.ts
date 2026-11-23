@@ -3,6 +3,7 @@ import { requireAdmin } from "@/lib/auth/admin";
 import { isPrimaryDisabled, setPrimaryDisabled } from "@/lib/config/api-config";
 import { backupAvailable } from "@/lib/api/backup";
 import { clearMusicCache } from "@/lib/api/music";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 /* ============================================================
    PRIMARY API KILL SWITCH (admin)
@@ -13,6 +14,7 @@ import { clearMusicCache } from "@/lib/api/music";
    ============================================================ */
 
 export async function GET() {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 
@@ -23,6 +25,7 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 

@@ -4,8 +4,10 @@ import { users, findUserById, patchUser } from "@/lib/db/users";
 import { readDb } from "@/lib/db/json-store";
 import { publicUser } from "@/lib/auth/session";
 import { playlistsByOwner } from "@/lib/db/playlists";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 export async function GET() {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 
@@ -39,6 +41,7 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 

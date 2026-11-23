@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { findUserByEmail, findUserByUsername } from "@/lib/db/users";
 import { createPasswordReset } from "@/lib/auth/session";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 export async function POST(request: Request) {
+  await ensureDbLoaded();
   const body = (await request.json().catch(() => null)) as { identifier?: string } | null;
   const identifier = (body?.identifier ?? "").trim();
 

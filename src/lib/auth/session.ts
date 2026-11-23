@@ -1,6 +1,6 @@
 import "server-only";
 import { cookies } from "next/headers";
-import { collection, updateDb } from "@/lib/db/json-store";
+import { collection, updateDb, ensureDbLoaded } from "@/lib/db/json-store";
 import { generateToken } from "@/lib/auth/password";
 import type { PublicUser, User } from "@/types";
 
@@ -33,6 +33,7 @@ export function findUserByToken(token: string): User | null {
 }
 
 export async function getSessionUser(): Promise<User | null> {
+  await ensureDbLoaded();
   const store = await cookies();
   const token = store.get(COOKIE)?.value;
   if (!token) return null;

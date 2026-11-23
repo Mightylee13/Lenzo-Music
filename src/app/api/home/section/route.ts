@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSectionPayload } from "@/lib/api/home-sections";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 /* ============================================================
    HOME SECTION — one homepage section at a time, so the page
@@ -12,6 +13,7 @@ import { getSectionPayload } from "@/lib/api/home-sections";
 export const revalidate = 0;
 
 export async function GET(request: Request) {
+  await ensureDbLoaded();
   const id = new URL(request.url).searchParams.get("id") ?? "";
   if (!/^[a-z0-9-]{1,64}$/i.test(id)) {
     return NextResponse.json({ error: "Bad section id" }, { status: 400 });

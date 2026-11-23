@@ -3,8 +3,10 @@ import { getAppSettings } from "@/lib/db/app-settings";
 import { createUser, findUserByEmail, findUserByUsername } from "@/lib/db/users";
 import { hashPassword } from "@/lib/auth/password";
 import { createSession, publicUser } from "@/lib/auth/session";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 export async function POST(request: Request) {
+  await ensureDbLoaded();
   const body = (await request.json().catch(() => null)) as
     | { username?: string; email?: string; password?: string }
     | null;

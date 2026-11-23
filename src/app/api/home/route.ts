@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { isLocalSection, localContext, localSectionPayload, peekSection, type SectionDescriptor } from "@/lib/api/home-sections";
 import { getAppSettings } from "@/lib/db/app-settings";
 import { PLAYLISTS } from "@/lib/data/demo";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 /* ============================================================
    HOME SHELL — instant, never waits on the upstream API.
@@ -14,6 +15,7 @@ import { PLAYLISTS } from "@/lib/data/demo";
 export const revalidate = 0;
 
 export async function GET() {
+  await ensureDbLoaded();
   const settings = getAppSettings().homeSections.filter((s) => s.enabled);
   const { recent, madeForUser } = await localContext();
 

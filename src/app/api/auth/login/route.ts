@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { findUserByEmail, findUserByUsername, getPasswordHash } from "@/lib/db/users";
 import { verifyPassword } from "@/lib/auth/password";
 import { createSession, publicUser } from "@/lib/auth/session";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 const IDENTIFIER_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function POST(request: Request) {
+  await ensureDbLoaded();
   const body = (await request.json().catch(() => null)) as
     | { identifier?: string; email?: string; username?: string; password?: string }
     | null;

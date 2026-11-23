@@ -3,14 +3,17 @@ import { requireAdmin } from "@/lib/auth/admin";
 import { getAppSettings, saveAppSettings } from "@/lib/db/app-settings";
 import { clearMusicCache } from "@/lib/api/music";
 import { updateDb } from "@/lib/db/json-store";
+import { ensureDbLoaded } from "@/lib/db/json-store";
 
 export async function GET() {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
   return NextResponse.json({ settings: getAppSettings() });
 }
 
 export async function PATCH(request: Request) {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
 
@@ -32,6 +35,7 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE() {
+  await ensureDbLoaded();
   const guard = await requireAdmin();
   if (!guard.ok) return guard.response;
   // Error monitoring helper: wipe the bounded API log.

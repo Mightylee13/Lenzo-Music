@@ -1,63 +1,213 @@
 import "server-only";
 import fs from "node:fs";
 import path from "node:path";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /* ============================================================
-   JSON FILE STORE
+   APP STORE — Supabase-backed (file fallback)
    ------------------------------------------------------------
-   Zero-setup persistence for accounts, playlists, sessions and
-   admin state. Writes are serialised through a small queue so
-   concurrent route handlers never interleave a partial write.
+   Same sync interface the app has always used; the driver is
+   chosen by environment:
 
-   Swap this module for a real driver (Postgres/SQLite) and the
-   rest of the application is unaffected — every caller goes
-   through `db()`.
+     SUPABASE_URL + SUPABASE_SERVICE_KEY present -> Supabase
+     otherwise (or on Supabase failure)          -> local db.json
+
+   SUPABASE LAYOUT — one general table, db.json semantics 1:1:
+     store(collection, id, data jsonb, updated_at)
+   Collection rows carry the item's `id`; a special "settings"
+   collection stores admin config keys (id = setting name).
+
+   Consistency model: an in-memory snapshot hydrates from
+   Supabase once per server instance. Every mutation runs on the
+   snapshot and is flushed as a precise diff (upserts + deletes)
+   through a serial queue — cheap at this scale, and safe
+   against concurrent serverless instances (no delete-all).
    ============================================================ */
+
+const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY ?? "";
+const SUPABASE_MODE = Boolean(SUPABASE_URL && SUPABASE_KEY);
+const SETTINGS_COLLECTION = "__settings__";
 
 const DATA_DIR = path.join(process.cwd(), ".data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 
 let cache: Record<string, unknown> | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
+let supabase: SupabaseClient | null = null;
+/** Resolves once the snapshot is ready (Supabase hydrate done, or file loaded). */
+let hydrate: Promise<void> | null = null;
+/** Known remote ids per collection — the baseline for delete diffs. */
+const remoteIds = new Map<string, Set<string>>();
 
-function ensure() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, "{}", "utf8");
+if (SUPABASE_MODE) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: { persistSession: false },
+  });
+  // Hydrate as soon as the module is imported, so cold serverless
+  // starts warm the snapshot while the first request is in flight.
+  void ensureDbLoaded();
+}
+
+/** Await once before reads/writes in async entry points (routes, session). */
+export function ensureDbLoaded(): Promise<void> {
+  return hydrate ?? loadSync();
+}
+
+function loadSync(): Promise<void> {
+  if (!hydrate) {
+    hydrate = SUPABASE_MODE ? hydrateFromSupabase() : Promise.resolve(loadFile());
+  }
+  return hydrate;
+}
+
+/* ---------- Supabase driver ---------- */
+
+interface StoreRow {
+  collection: string;
+  id: string;
+  data: unknown;
+}
+
+async function hydrateFromSupabase(): Promise<void> {
+  try {
+    const snap: Record<string, unknown> = {};
+    remoteIds.clear();
+    let from = 0;
+    for (;;) {
+      const { data, error } = await supabase!
+        .from("store")
+        .select("collection,id,data")
+        .range(from, from + 999)
+        .order("collection", { ascending: true })
+        .order("id", { ascending: true });
+      if (error) throw new Error(error.message);
+      const rows = (data ?? []) as StoreRow[];
+      for (const row of rows) {
+        if (row.collection === SETTINGS_COLLECTION) {
+          snap[row.id] = row.data;
+        } else {
+          if (!Array.isArray(snap[row.collection])) snap[row.collection] = [];
+          (snap[row.collection] as unknown[]).push(row.data);
+        }
+        const ids = remoteIds.get(row.collection) ?? new Set<string>();
+        ids.add(row.id);
+        remoteIds.set(row.collection, ids);
+      }
+      if (!rows.length || rows.length < 1000) break;
+      from += rows.length;
+    }
+    cache = snap;
+  } catch (err) {
+    // Supabase unreachable (fresh project without tables, network blip):
+    // fall back to the file store so the app never hard-fails.
+    console.error("[db] supabase hydrate failed — falling back to file store:", err instanceof Error ? err.message : err);
+    supabase = null; // sticky fallback for this instance
+    loadFile();
   }
 }
 
-export function readDb<T = Record<string, unknown>>(): T {
-  if (cache) return cache as T;
-  ensure();
+function settingsRow(name: string): StoreRow {
+  return { collection: SETTINGS_COLLECTION, id: name, data: getSetting(name, undefined) };
+}
+
+function collectionRows(name: string): StoreRow[] {
+  return collection<Record<string, unknown>>(name, []).map((item, i) => ({
+    collection: name,
+    id: typeof item.id === "string" ? item.id : `row_${i}`,
+    data: item,
+  }));
+}
+
+function persistToSupabase(): Promise<void> {
+  if (!supabase || !cache) return Promise.resolve();
+
+  // Upsert every row we now hold; delete remote rows that vanished.
+  const upserts: StoreRow[] = [];
+  const deletes: Array<{ collection: string; ids: string[] }> = [];
+  for (const [key, value] of Object.entries(cache)) {
+    if (Array.isArray(value)) {
+      const rows = collectionRows(key);
+      for (const row of rows) upserts.push(row);
+      const ids = new Set(rows.map((r) => r.id));
+      const stale = [...(remoteIds.get(key) ?? [])].filter((id) => !ids.has(id));
+      if (stale.length) deletes.push({ collection: key, ids: stale });
+      remoteIds.set(key, ids);
+    } else {
+      upserts.push(settingsRow(key));
+      const ids = remoteIds.get(SETTINGS_COLLECTION) ?? new Set<string>();
+      ids.add(key);
+      remoteIds.set(SETTINGS_COLLECTION, ids);
+    }
+  }
+
+  const work = (async () => {
+    try {
+      const pageSize = 500;
+      for (let i = 0; i < upserts.length; i += pageSize) {
+        const { error } = await supabase!
+          .from("store")
+          .upsert(upserts.slice(i, i + pageSize), { onConflict: "collection,id" });
+        if (error) throw new Error(error.message);
+      }
+      for (const del of deletes) {
+        const { error } = await supabase!
+          .from("store")
+          .delete()
+          .eq("collection", del.collection)
+          .in("id", del.ids);
+        if (error) throw new Error(error.message);
+      }
+    } catch (err) {
+      console.error("[db] supabase persist failed:", err instanceof Error ? err.message : err);
+    }
+  })();
+  return work;
+}
+
+/* ---------- File driver (dev / fallback) ---------- */
+
+function ensureFile() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, "{}", "utf8");
+}
+
+function loadFile(): void {
+  ensureFile();
   try {
     cache = JSON.parse(fs.readFileSync(DB_FILE, "utf8")) as Record<string, unknown>;
   } catch {
     cache = {};
   }
-  return cache as T;
+}
+
+function persistFile(): void {
+  const snapshot = JSON.stringify(cache ?? {}, null, 2);
+  try {
+    ensureFile();
+    const tmp = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tmp, snapshot, "utf8");
+    fs.renameSync(tmp, DB_FILE);
+  } catch (err) {
+    console.error("[db] file write failed", err);
+  }
+}
+
+/* ---------- public interface (unchanged) ---------- */
+
+export function readDb<T = Record<string, unknown>>(): T {
+  if (cache) return cache as T;
+  loadSync();
+  return (cache ?? {}) as T;
 }
 
 function persist() {
-  const snapshot = JSON.stringify(cache ?? {}, null, 2);
-  writeQueue = writeQueue.then(
-    () =>
-      new Promise<void>((resolve) => {
-        try {
-          ensure();
-          const tmp = `${DB_FILE}.tmp`;
-          fs.writeFileSync(tmp, snapshot, "utf8");
-          fs.renameSync(tmp, DB_FILE);
-        } catch (err) {
-          console.error("[db] write failed", err);
-        }
-        resolve();
-      })
-  );
+  if (supabase) writeQueue = writeQueue.then(() => persistToSupabase());
+  else writeQueue = writeQueue.then(() => persistFile());
   return writeQueue;
 }
 
-/** Mutate the store; the change is flushed to disk asynchronously. */
+/** Mutate the store; the change is flushed (Supabase or disk) asynchronously. */
 export function updateDb<T = Record<string, unknown>>(mutator: (db: Record<string, unknown>) => T): T {
   const db = readDb();
   const result = mutator(db);
@@ -85,5 +235,16 @@ export function setSetting(name: string, value: unknown): void {
 /** Test/ops helper — wipes all persisted application data. */
 export function resetDb(): void {
   cache = {};
-  void persist();
+  remoteIds.clear();
+  if (supabase) {
+    writeQueue = writeQueue.then(async () => {
+      try {
+        await supabase!.from("store").delete().neq("collection", "__none__");
+      } catch (err) {
+        console.error("[db] supabase reset failed", err);
+      }
+    });
+  } else {
+    void persist();
+  }
 }
