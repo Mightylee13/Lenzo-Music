@@ -112,7 +112,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             title={track.title}
             subtitle={track.artist}
             onPlay={() => usePlayerStore.getState().playTrack(track, payload.tracks ?? [])}
-            className="w-[150px] shrink-0 snap-start md:w-[176px]"
+            className="w-[124px] shrink-0 snap-start md:w-[176px]"
           />
         ))}
       </RenderSection>
@@ -131,7 +131,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             subtitle={`Playlist · ${pl.owner}`}
             badge="Playlist"
             href={`/playlists/${pl.id}`}
-            className="w-[150px] shrink-0 snap-start md:w-[176px]"
+            className="w-[124px] shrink-0 snap-start md:w-[176px]"
           />
         ))}
       </RenderSection>
@@ -150,7 +150,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             subtitle={`${al.artist}${al.year ? ` · ${al.year}` : ""}`}
             badge={albumTypeLabel(al.type)}
             href={`/albums/${al.id}`}
-            className="w-[150px] shrink-0 snap-start md:w-[176px]"
+            className="w-[124px] shrink-0 snap-start md:w-[176px]"
           />
         ))}
       </RenderSection>
@@ -170,7 +170,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             badge="Artist"
             round
             href={`/artists/${ar.id}`}
-            className="w-[132px] shrink-0 snap-start md:w-[156px]"
+            className="w-[108px] shrink-0 snap-start md:w-[156px]"
           />
         ))}
       </RenderSection>
@@ -187,7 +187,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
             title={`#${i + 1} ${track.title}`}
             subtitle={track.artist}
             onPlay={() => usePlayerStore.getState().playTrack(track, arr)}
-            className="w-[150px] shrink-0 snap-start md:w-[176px]"
+            className="w-[124px] shrink-0 snap-start md:w-[176px]"
           />
         ))}
       </RenderSection>

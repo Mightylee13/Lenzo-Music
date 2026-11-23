@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { SearchIcon, Play, TrendingUp, X } from "lucide-react";
+import { SearchIcon, Play, X } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
 import { EmptyState, ErrorState, TrackListSkeleton } from "@/components/ui/skeletons";
 import { useApi, useDebounced } from "@/lib/client/hooks";
@@ -17,10 +17,11 @@ import type { SearchResults, Track } from "@/types";
    ============================================================ */
 
 const RECENT_KEY = "lenzo.search.recent";
+// Remembers the query across navigations so coming back (from an album,
+// artist or the dock's Search tab) restores the search instead of wiping it.
+const LASTQ_KEY = "lenzo.search.last";
 // All sources (SoundCloud + Spotify + YouTube) are merged into one unified
 // catalogue — the UI never splits results by provider.
-
-const TRENDING_SEARCHES = ["Burna Boy", "afrobeats 2025", "Amapiano mix", "lo-fi chill", "Wizkid", "gospel songs"];
 
 export default function SearchPage() {
   return (
@@ -33,18 +34,41 @@ export default function SearchPage() {
 function SearchInner() {
   const router = useRouter();
   const params = useSearchParams();
-  const [query, setQuery] = useState(params.get("q") ?? "");
+  // Query model: the URL ?q= is the source of truth (shareable, survives
+  // back-navigation). `typed` overrides it only while the user is actively
+  // typing in this mount; `lastQuery` (sessionStorage) covers returning via
+  // the dock/tab without a ?q= in the URL.
+  const urlQuery = params.get("q") ?? "";
+  const [typed, setTyped] = useState<string | null>(null);
+  const [lastQuery, setLastQuery] = useState("");
   const [recent, setRecent] = useState<string[]>([]);
   const [focused, setFocused] = useState(false);
+  const query = typed !== null ? typed : urlQuery || lastQuery;
   const debounced = useDebounced(query.trim(), 200);
 
   useEffect(() => {
     try {
       setRecent(JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]"));
+      setLastQuery(sessionStorage.getItem(LASTQ_KEY) ?? "");
     } catch {
       setRecent([]);
     }
   }, []);
+
+  // Browser back/forward between ?q= entries re-syncs the box.
+  useEffect(() => {
+    if (urlQuery && urlQuery !== query) setTyped(urlQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlQuery]);
+
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length >= 2) {
+      try {
+        sessionStorage.setItem(LASTQ_KEY, q);
+      } catch { /* private mode */ }
+    }
+  }, [query]);
 
   const suggest = useApi<{ suggestions: string[] }>(debounced.length >= 2 ? `/api/music/suggest?q=${encodeURIComponent(debounced)}` : null);
 
@@ -60,7 +84,7 @@ function SearchInner() {
   );
 
   const commit = (q: string) => {
-    setQuery(q);
+    setTyped(q);
     if (q.trim().length >= 2) {
       const next = [q, ...recent.filter((r) => r !== q)].slice(0, 8);
       setRecent(next);
@@ -73,13 +97,12 @@ function SearchInner() {
   // stale suggestions remain visible until fresh ones arrive.
   const suggestions = suggest.data?.suggestions?.filter((s) => s.toLowerCase() !== debounced.toLowerCase()) ?? [];
 
-  // Instant local suggestions — recent searches and trending chips that
-  // match what's typed, shown while the server suggestion call is in flight.
+  // Instant local suggestions — recent searches that match what's typed,
+  // shown while the server suggestion call is in flight.
   const localSuggestions = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
     const pool = new Set<string>();
-    for (const t of TRENDING_SEARCHES) if (t.toLowerCase().includes(q)) pool.add(t);
     for (const r of recent) if (r !== q && r.toLowerCase().includes(q)) pool.add(r);
     return [...pool].slice(0, 5);
   }, [query, recent]);
@@ -104,38 +127,48 @@ function SearchInner() {
             <SearchIcon className="size-5 shrink-0 text-muted" />
             <input
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => setTyped(e.target.value)}
               onFocus={() => setFocused(true)}
               onBlur={() => setTimeout(() => setFocused(false), 150)}
               placeholder="Songs, artists, albums or moods…"
               className="min-w-0 flex-1 bg-transparent text-base font-medium text-ink outline-none placeholder:text-faint"
               aria-label="Search query"
-              autoFocus
             />
             {query && (
-              <button type="button" aria-label="Clear search" onClick={() => { setQuery(""); router.replace("/search", { scroll: false }); }} className="grid size-6 place-items-center rounded-full bg-white/8 text-muted hover:text-ink">
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => {
+                  setTyped("");
+                  setLastQuery("");
+                  try { sessionStorage.removeItem(LASTQ_KEY); } catch { /* private mode */ }
+                  router.replace("/search", { scroll: false });
+                }}
+                className="grid size-6 place-items-center rounded-full bg-white/8 text-muted hover:text-ink"
+              >
                 <X className="size-3.5" />
               </button>
             )}
           </div>
         </form>
 
-        {/* Dropdown: local + server suggestions while typing; trending chips
-            only when the query is empty — never covering live results. */}
+        {/* Dropdown: recent matches + server suggestions while typing. */}
         {focused && dropdownItems.length > 0 && (
           <div className="absolute inset-x-4 z-30 mt-2 rounded-2xl border border-white/8 glass-strong p-2 shadow-2xl shadow-black/60 md:inset-x-0 md:mt-1 md:max-w-2xl">
             {showSuggestions(dropdownItems, query, (s) => commit(s))}
           </div>
         )}
-        {focused && query.trim().length < 2 && suggestions.length === 0 && (
-          <div className="absolute inset-x-4 z-30 mt-2 rounded-2xl border border-white/8 glass-strong p-2 shadow-2xl shadow-black/60 md:inset-x-0 md:mt-1 md:max-w-2xl">
-            <TrendingChips onPick={commit} />
-          </div>
-        )}
       </div>
 
-      {/* Empty states */}
-      {debounced.length < 2 && !searching && <SearchLanding recent={recent} onPick={commit} onClear={() => { setRecent([]); localStorage.removeItem(RECENT_KEY); }} />}
+      {/* Empty states — only while the field is idle, never popping over the
+          keyboard while the user is trying to type. */}
+      {debounced.length < 2 && !searching && !focused && (
+        <SearchLanding
+          recent={recent}
+          onPick={commit}
+          onClear={() => { setRecent([]); localStorage.removeItem(RECENT_KEY); }}
+        />
+      )}
 
       {/* Results */}
       {(searching || results.data) && (
@@ -178,21 +211,6 @@ function showSuggestions(suggestions: string[], query: string, onPick: (q: strin
   );
 }
 
-function TrendingChips({ onPick }: { onPick: (q: string) => void }) {
-  return (
-    <div className="px-3 pb-2 pt-2">
-      <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-faint">Trending searches</p>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {TRENDING_SEARCHES.map((t) => (
-          <button key={t} type="button" onClick={() => onPick(t)} className="rounded-pill bg-white/6 px-3 py-1.5 text-xs font-semibold text-ink hover:bg-white/10">
-            {t}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function SearchLanding({ recent, onPick, onClear }: { recent: string[]; onPick: (q: string) => void; onClear: () => void }) {
   return (
     <div className="flex flex-col gap-8">
@@ -212,18 +230,6 @@ function SearchLanding({ recent, onPick, onClear }: { recent: string[]; onPick: 
           </div>
         </section>
       )}
-      <section>
-        <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-ink">
-          <TrendingUp className="size-4 text-cyan" /> Trending searches
-        </h2>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-          {TRENDING_SEARCHES.map((t) => (
-            <button key={t} type="button" onClick={() => onPick(t)} className="rounded-card surface-gradient px-4 py-3.5 text-left text-sm font-bold text-ink shadow-md shadow-black/25 transition-transform hover:-translate-y-0.5">
-              {t}
-            </button>
-          ))}
-        </div>
-      </section>
       <section>
         <h2 className="mb-3 text-lg font-bold text-ink">Browse all</h2>
         <GenreGrid />
