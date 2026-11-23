@@ -102,36 +102,54 @@ async function trimCache(name, max) {
   }
 }
 
-async function networkFirst(req, isNavigation) {
+async function cacheMatchNav(cache, key) {
+  // Vary headers (RSC/Next-Router-*) break plain matching — ignore them.
+  try {
+    return await cache.match(key, { ignoreVary: true });
+  } catch {
+    return cache.match(key);
+  }
+}
+
+/**
+ * Network-first over a NORMALIZED cache key: `_rsc` values and router
+ * headers change on every navigation, so responses are stored (and
+ * matched) by path only — offline navigations actually hit the cache.
+ */
+async function networkFirst(req, key) {
   const cache = await caches.open(NAV_CACHE);
   try {
     const res = await fetch(req);
-    if (res && res.ok && res.type === "basic") {
-      void cache.put(req, res.clone()).then(() => trimCache(NAV_CACHE, NAV_MAX_ENTRIES));
+    if (res && res.ok) {
+      void cache.put(key, res.clone()).then(() => trimCache(NAV_CACHE, NAV_MAX_ENTRIES));
     }
     return res;
   } catch (err) {
-    const cached = await cache.match(req);
+    const cached = await cacheMatchNav(cache, key);
     if (cached) return cached;
-    if (isNavigation) {
-      // Unknown route offline: serve the cached app shell — the client
-      // router renders the page from it.
-      const shell = await cache.match("/");
-      if (shell) return shell;
-    }
+    // Unknown route offline: serve the cached app shell — the client
+    // router renders the page from it.
+    const shell = await cacheMatchNav(cache, "/");
+    if (shell) return shell;
     throw err;
   }
 }
 
-async function cacheFirst(req) {
+async function cacheFirst(req, key) {
   const cache = await caches.open(NAV_CACHE);
-  const cached = await cache.match(req);
+  const cached = await cacheMatchNav(cache, key);
   if (cached) return cached;
   const res = await fetch(req);
   if (res && res.ok) {
-    void cache.put(req, res.clone()).then(() => trimCache(NAV_CACHE, NAV_MAX_ENTRIES));
+    void cache.put(key, res.clone()).then(() => trimCache(NAV_CACHE, NAV_MAX_ENTRIES));
   }
   return res;
+}
+
+/** Build a stable per-path cache key for navigation/RSC requests. */
+function navKey(url, isRsc) {
+  const clean = url.origin + url.pathname + (isRsc ? "?__rsc__" : "");
+  return new Request(clean, { method: "GET" });
 }
 
 /* ---------------- fetch routing ---------------- */
@@ -172,13 +190,13 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   if (url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/_next/image")) {
-    event.respondWith(cacheFirst(req));
+    event.respondWith(cacheFirst(req, req.url));
     return;
   }
 
   const isNavigation = req.mode === "navigate";
-  const isRsc = url.searchParams.has("_rsc") || req.headers.get("RSC") === "1";
+  const isRsc = !isNavigation && (url.searchParams.has("_rsc") || req.headers.get("RSC") === "1");
   if (isNavigation || isRsc) {
-    event.respondWith(networkFirst(req, isNavigation));
+    event.respondWith(networkFirst(req, navKey(url, isRsc)));
   }
 });

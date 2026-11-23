@@ -178,6 +178,21 @@ if (typeof window !== "undefined") {
   });
 }
 
+/**
+ * Offline navigation helper: walk the queue from `start` in `dir` and
+ * return the first track whose audio bytes are stored on this device —
+ * skips land on playable songs instead of dimmed, dead ones.
+ */
+async function firstPlayableOffset(start: number, dir: 1 | -1): Promise<number | null> {
+  const { queue } = usePlayerStore.getState();
+  if (!queue.length) return null;
+  for (let i = 0; i < queue.length; i++) {
+    const idx = (start + i * dir + queue.length) % queue.length;
+    if (await offlineStreamSource(queue[idx].id)) return idx;
+  }
+  return null;
+}
+
 export async function resolveAudio(track: Track, force = false): Promise<ResolvedAudio> {
   const cached = resolvedCache.get(track.id);
   if (cached && !force) return cached;
@@ -401,6 +416,18 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
       const cachedSource = await offlineStreamSource(track.id);
       if (token !== resolveToken) return;
       if (!cachedSource) {
+        // Not saved on this device: hop to the next saved song in the
+        // queue (bounded by a failure streak so it can never loop).
+        failureStreak += 1;
+        const skipState = usePlayerStore.getState();
+        if (failureStreak <= skipState.queue.length && skipState.queue.length > 1) {
+          const playable = await firstPlayableOffset(skipState.index + 1, 1);
+          if (token === resolveToken && playable !== null) {
+            void startTrack(skipState.queue[playable], skipState.queue, playable);
+            return;
+          }
+        }
+        if (token !== resolveToken) return;
         usePlayerStore.setState({
           status: "error",
           error: "You're offline — this song isn't saved on your device.",
@@ -627,7 +654,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       set({ isPlaying: false, status: "paused", progress: 0 });
       return;
     }
-    void startTrack(queue[nextIndex], queue, nextIndex);
+    void (async () => {
+      let idx = nextIndex;
+      // Offline: land on the next SAVED song, skipping dimmed ones.
+      if (isOffline()) {
+        const playable = await firstPlayableOffset(nextIndex, 1);
+        if (playable === null) {
+          set({ isPlaying: false, status: "paused", error: "You're offline — no saved songs left in this queue." });
+          useUi.getState().showToast("Offline — no more saved songs in this queue", "info");
+          return;
+        }
+        idx = playable;
+      }
+      void startTrack(queue[idx], queue, idx);
+    })();
   },
 
   prev: () => {
@@ -638,8 +678,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       set({ progress: 0 });
       return;
     }
-    const prevIndex = index <= 0 ? queue.length - 1 : index - 1;
-    void startTrack(queue[prevIndex], queue, prevIndex);
+    void (async () => {
+      let idx = index <= 0 ? queue.length - 1 : index - 1;
+      // Offline: previous SAVED song instead of a dead one.
+      if (isOffline()) {
+        const playable = await firstPlayableOffset(idx, -1);
+        if (playable === null) {
+          useUi.getState().showToast("Offline — no saved songs behind this one", "info");
+          return;
+        }
+        idx = playable;
+      }
+      void startTrack(queue[idx], queue, idx);
+    })();
   },
 
   seek: (seconds) => {

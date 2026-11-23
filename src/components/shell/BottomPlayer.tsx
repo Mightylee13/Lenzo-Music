@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   Heart,
   ListMusic,
@@ -43,11 +44,13 @@ export default function BottomPlayer() {
   const session = useSession();
   const ui = useUi.getState();
   const rightPanel = useUi((s) => s.rightPanelVisible);
+  const pathname = usePathname();
 
   const pct = duration > 0 ? (progress / duration) * 100 : 0;
   const busy = status === "resolving";
 
-  if (!current) return null;
+  // The lyrics page has its own always-visible transport dock.
+  if (!current || pathname === "/lyrics") return null;
 
   const RepeatIcon = repeat === "one" ? Repeat1 : Repeat;
   const VolumeIcon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;

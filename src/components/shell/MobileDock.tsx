@@ -67,8 +67,10 @@ export function MiniPlayer() {
   const resolved = usePlayerStore((s) => s.resolved);
   const status = usePlayerStore((s) => s.status);
   const busy = status === "resolving";
+  const pathname = usePathname();
 
-  if (!current) return null;
+  // The lyrics page has its own always-visible transport dock.
+  if (!current || pathname === "/lyrics") return null;
   const pct = duration > 0 ? (progress / duration) * 100 : 0;
 
   return (
