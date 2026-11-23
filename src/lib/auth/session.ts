@@ -1,6 +1,6 @@
 import "server-only";
 import { cookies } from "next/headers";
-import { collection, updateDb, ensureDbLoaded } from "@/lib/db/json-store";
+import { collection, updateDb, ensureDbLoaded, refreshDbIfStale } from "@/lib/db/json-store";
 import { generateToken } from "@/lib/auth/password";
 import type { PublicUser, User } from "@/types";
 
@@ -37,6 +37,12 @@ export async function getSessionUser(): Promise<User | null> {
   const store = await cookies();
   const token = store.get(COOKIE)?.value;
   if (!token) return null;
+  const user = findUserByToken(token);
+  if (user) return user;
+  // The token lives in the DB but this instance's snapshot may predate the
+  // login (serverless instances hydrate once, writes flush from others):
+  // refresh the snapshot once and retry before concluding "signed out".
+  await refreshDbIfStale(3_000);
   return findUserByToken(token);
 }
 

@@ -165,6 +165,38 @@ export function LyricsView({ className = "", variant = "panel" }: { className?: 
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * Exactly the line being sung — rendered over the artwork as a single
+ * bold line (Spotify's current-line card instead of a text block).
+ */
+export function ActiveLyricLine({ className = "" }: { className?: string }) {
+  const current = usePlayerStore((s) => s.current);
+  const lyrics = usePlayerStore((s) => s.lyrics);
+  const progress = usePlayerStore((s) => s.progress);
+
+  const activeText = useMemo(() => {
+    const lines = parseLyrics(lyrics ?? "");
+    if (!lines.length || !lines.some((l) => l.time >= 0)) return null;
+    let idx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].time >= 0 && lines[i].time <= progress + 0.2) idx = i;
+      else if (lines[i].time > progress) break;
+    }
+    if (idx === -1) return null;
+    const text = lines[idx].text.trim();
+    return text ? text : null;
+  }, [lyrics, progress, current?.id]);
+
+  if (!activeText) return null;
+  return (
+    <p className={`animate-fade-in text-lg font-extrabold leading-snug text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.9)] ${className}`}>
+      {activeText}
+    </p>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
 export function QueueView({ onClose, standalone = false }: { onClose?: () => void; standalone?: boolean }) {
   const session = useSession();
   const store = usePlayerStore.getState();

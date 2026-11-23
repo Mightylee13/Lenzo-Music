@@ -5,9 +5,13 @@ import {
   playlistsByOwner,
   publicPlaylists,
 } from "@/lib/db/playlists";
+import { refreshDbIfStale } from "@/lib/db/json-store";
 
 /** GET — your playlists, plus public ones from other listeners. */
 export async function GET() {
+  // Refresh the snapshot first: another instance may have just flushed an
+  // import/create. List must never go stale for longer than the window.
+  await refreshDbIfStale(15_000);
   const user = await getSessionUser();
   const mine = user ? playlistsByOwner(user.id) : [];
   const discover = user ? publicPlaylists().filter((p) => p.ownerId !== user.id) : publicPlaylists();

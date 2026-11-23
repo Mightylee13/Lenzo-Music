@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth/session";
 import { curatedPlaylistById } from "@/lib/api/curated";
+import { ensureDbLoaded, refreshDbIfStale } from "@/lib/db/json-store";
 import {
   addTrackToPlaylist,
   deletePlaylist,
@@ -23,7 +24,15 @@ type Body = {
  *  resolve here too; they are read-only for everyone. */
 export async function GET(_request: Request, ctx: RouteContext<"/api/playlists/[id]">) {
   const { id } = await ctx.params;
-  const playlist = findPlaylist(id) ?? (await curatedPlaylistById(id));
+  await ensureDbLoaded();
+  let playlist = findPlaylist(id) ?? (await curatedPlaylistById(id));
+  if (!playlist) {
+    // This instance's snapshot may predate the write that created the
+    // playlist on another serverless instance — refresh once before the
+    // honest "not found".
+    await refreshDbIfStale(3_000);
+    playlist = findPlaylist(id) ?? (await curatedPlaylistById(id));
+  }
   if (!playlist) return NextResponse.json({ error: "Playlist not found" }, { status: 404 });
 
   const user = await getSessionUser();

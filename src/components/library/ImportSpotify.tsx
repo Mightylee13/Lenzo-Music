@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { FilePlus2, Loader2, X } from "lucide-react";
 import { useUi } from "@/lib/store/ui";
+import { invalidateApiCache } from "@/lib/client/hooks";
 
 /* ============================================================
    SPOTIFY PLAYLIST IMPORT — paste any public Spotify playlist
@@ -37,6 +38,9 @@ export default function ImportSpotifyButton({ onImported }: { onImported?: () =>
         | { playlist?: { id: string; name: string }; importedCount?: number; error?: string }
         | null;
       if (!res.ok || !body?.playlist) throw new Error(body?.error ?? "Import failed");
+      // The library list is painted from a short-lived session cache — drop
+      // it so the imported playlist is there the moment the user returns.
+      invalidateApiCache("/api/playlists");
       useUi.getState().showToast(`Imported ${body.importedCount ?? 0} songs from "${body.playlist.name}"`, "success");
       close();
       onImported?.();

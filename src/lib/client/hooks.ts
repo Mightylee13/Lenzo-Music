@@ -85,6 +85,13 @@ function writeSessionCache<T>(url: string, data: T): void {
   }
 }
 
+/** Drop the painted cache for one URL (e.g. after a mutation elsewhere). */
+export function invalidateApiCache(url: string): void {
+  try {
+    sessionStorage.removeItem(USE_API_CACHE_PREFIX + url);
+  } catch { /* private mode */ }
+}
+
 /** Simple open/close with Escape handling + body scroll lock. */
 export function useOverlay(open: boolean, onClose: () => void) {
   const ref = useRef<HTMLDivElement | null>(null);

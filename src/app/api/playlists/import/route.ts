@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth/session";
 import { createPlaylist, updatePlaylist } from "@/lib/db/playlists";
 import { importSpotifyPlaylist } from "@/lib/api/spotifyPlaylist";
+import { flushWrites, refreshDbIfStale } from "@/lib/db/json-store";
 
 /**
  * POST /api/playlists/import — body: { url }. Reads a public Spotify
@@ -20,6 +21,11 @@ export async function POST(request: Request) {
   }
 
   try {
+    // Start from the freshest snapshot so the create doesn't sit on a stale
+    // baseline, and flush the writes to Supabase BEFORE responding — the
+    // client redirects straight to the playlist page, which may be served
+    // by another serverless instance that otherwise read the older snapshot.
+    await refreshDbIfStale(15_000);
     const imported = await importSpotifyPlaylist(body.url);
     const created = createPlaylist({
       name: imported.name,
@@ -33,6 +39,7 @@ export async function POST(request: Request) {
       ...(artwork ? { artwork } : {}),
     });
     if (!playlist) throw new Error("Import failed");
+    await flushWrites();
     return NextResponse.json(
       { playlist, importedCount: imported.tracks.length, via: imported.source },
       { status: 201 },

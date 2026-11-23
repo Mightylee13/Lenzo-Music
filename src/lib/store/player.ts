@@ -70,7 +70,7 @@ let failureStreak = 0;
 const resolvedCache = new Map<string, ResolvedAudio>();
 
 /** Seconds before track end at which the next track starts loading. */
-const PRELOAD_AHEAD_SEC = 20;
+const PRELOAD_AHEAD_SEC = 45;
 let preloadEl: HTMLAudioElement | null = null;
 let preloadKey: string | null = null;
 
@@ -216,6 +216,43 @@ function loadSource(url: string, autoplay: boolean) {
   }
 }
 
+function setMediaPlaybackState(state: "playing" | "paused") {
+  if (typeof window === "undefined" || !("mediaSession" in navigator)) return;
+  try {
+    navigator.mediaSession.playbackState = state;
+  } catch { /* unsupported */ }
+}
+
+/**
+ * Wire the OS control-center actions once. Without these handlers the
+ * lockscreen/control-center play button silently fails (the OS clicks the
+ * audio element directly — which cannot recover an expired signed CDN URL)
+ * and next/prev do nothing at all.
+ */
+function installMediaSessionHandlers() {
+  if (typeof window === "undefined" || !("mediaSession" in navigator)) return;
+  const st = () => usePlayerStore.getState();
+  const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
+    ["play", () => st().resume()],
+    ["pause", () => st().pause()],
+    ["previoustrack", () => st().prev()],
+    ["nexttrack", () => st().next()],
+    ["seekto", (details) => {
+      const t = (details as { seekTime?: number }).seekTime;
+      if (typeof t === "number") st().seek(t);
+    }],
+    ["seekbackward", () => st().seek(Math.max(0, (audio?.currentTime ?? 0) - 10))],
+    ["seekforward", () => st().seek((audio?.currentTime ?? 0) + 10)],
+  ];
+  for (const [action, handler] of handlers) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      /* action unsupported on this platform */
+    }
+  }
+}
+
 function updateMediaSession(track: Track, resolved: ResolvedAudio | null) {
   if (typeof window === "undefined" || !("mediaSession" in navigator)) return;
   try {
@@ -274,6 +311,21 @@ async function startTrack(track: Track, queue: Track[], index: number) {
     usePlayerStore.setState({ status: "playing", isPlaying: true });
 
     updateMediaSession(track, resolved);
+
+    // Start resolving the next queue entry right away — a converter takes
+    // several seconds, which is longer than the idle gap before "ended" if
+    // the listener skips early. Resolution warms the client cache; the byte
+    // preload keeps its own window (PRELOAD_AHEAD_SEC).
+    void (async () => {
+      if (token !== resolveToken) return;
+      const ni = computeNextIndex(usePlayerStore.getState(), true);
+      if (ni === null) return;
+      const nt = usePlayerStore.getState().queue[ni];
+      if (!nt) return;
+      try {
+        await resolveAudio(nt);
+      } catch { /* skip path handles it */ }
+    })();
   } catch (err) {
     if (token !== resolveToken) return;
     const message = err instanceof Error ? err.message : "This track is unavailable right now.";
@@ -339,9 +391,47 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     el.addEventListener("playing", () => {
       failureStreak = 0;
       set({ status: "playing", isPlaying: true, error: null });
+      setMediaPlaybackState("playing");
     });
     el.addEventListener("pause", () => {
-      if (!el.ended) set({ isPlaying: false, status: "paused" });
+      if (!el.ended) {
+        set({ isPlaying: false, status: "paused" });
+        setMediaPlaybackState("paused");
+      }
+    });
+    el.addEventListener("error", () => {
+      const state = usePlayerStore.getState();
+      if (!state.current || !el.src || !el.currentSrc) {
+        // Source intentionally dropped (startTrack swap) — not a failure.
+        return;
+      }
+      // Signed CDN links expire. A resume from the control center after a
+      // long background pause hits a dead URL and plays silence: recover by
+      // re-resolving the SAME track and restoring the position, instead of
+      // surfacing an error (or letting the song sit dead until the app is
+      // reopened).
+      const position = el.currentTime || 0;
+      const track = state.current;
+      void (async () => {
+        try {
+          const resolved = await resolveAudio(track, true);
+          if (usePlayerStore.getState().current?.id !== track.id) return;
+          loadSource(audioSourceFor(resolved, track.id), usePlayerStore.getState().isPlaying);
+          el.currentTime = position;
+          const still = usePlayerStore.getState();
+          if (still.isPlaying) {
+            await el.play().catch(() => set({ isPlaying: false, status: "paused" }));
+          }
+          set({ resolved, status: "playing", error: null });
+          setMediaPlaybackState("playing");
+        } catch {
+          set({
+            error: "The audio source stopped working. Trying the next available source…",
+            status: "error",
+          });
+          setMediaPlaybackState("paused");
+        }
+      })();
     });
 
     el.addEventListener("ended", () => {
@@ -358,14 +448,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       usePlayerStore.getState().next(true);
     });
 
-    el.addEventListener("error", () => {
-      const state = usePlayerStore.getState();
-      if (!state.current || !el.src) return;
-      set({
-        error: "The audio source stopped working. Trying the next available source…",
-        status: "error",
-      });
-    });
+    installMediaSessionHandlers();
   },
 
   playQueue: (tracks, startIndex = 0) => {

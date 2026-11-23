@@ -37,6 +37,8 @@ let writeQueue: Promise<void> = Promise.resolve();
 let supabase: SupabaseClient | null = null;
 /** Resolves once the snapshot is ready (Supabase hydrate done, or file loaded). */
 let hydrate: Promise<void> | null = null;
+/** When the current snapshot was pulled from Supabase (0 = never/file). */
+let hydratedAt = 0;
 /** Known remote ids per collection — the baseline for delete diffs. */
 const remoteIds = new Map<string, Set<string>>();
 
@@ -54,11 +56,39 @@ export function ensureDbLoaded(): Promise<void> {
   return hydrate ?? loadSync();
 }
 
-function loadSync(): Promise<void> {
-  if (!hydrate) {
-    hydrate = SUPABASE_MODE ? hydrateFromSupabase() : Promise.resolve(loadFile());
+function loadSync(allowRetry = false): Promise<void> {
+  if (!hydrate || allowRetry) {
+    // A failed Supabase hydrate used to fall back to an empty file store
+    // and stick forever — on serverless that wiped out logins and data for
+    // that instance's whole lifetime. Supabase is the only real store in
+    // production, so failures stay retryable instead of sticky (the file
+    // driver remains for local dev without env vars).
+    if (SUPABASE_MODE) {
+      const previous = allowRetry ? hydrate : null;
+      hydrate = (previous ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(() => hydrateFromSupabase())
+        .then(() => {
+          hydratedAt = Date.now();
+        });
+    } else {
+      hydrate = Promise.resolve(loadFile());
+    }
   }
   return hydrate;
+}
+
+/**
+ * Serverless consistency: each instance snapshots the DB at boot and never
+ * hears about writes flushed by other instances, so a playlist created on
+ * instance A was invisible to instances B and C ("playlist not found" /
+ * missing from library). Reads refresh the snapshot when it is older than
+ * `maxAgeMs` — one cheap query at most every window, per instance.
+ */
+export async function refreshDbIfStale(maxAgeMs = 15_000): Promise<void> {
+  if (!SUPABASE_MODE) return;
+  if (Date.now() - hydratedAt < maxAgeMs && cache) return;
+  await loadSync(true).catch(() => undefined);
 }
 
 /* ---------- Supabase driver ---------- */
@@ -99,11 +129,12 @@ async function hydrateFromSupabase(): Promise<void> {
     }
     cache = snap;
   } catch (err) {
-    // Supabase unreachable (fresh project without tables, network blip):
-    // fall back to the file store so the app never hard-fails.
-    console.error("[db] supabase hydrate failed — falling back to file store:", err instanceof Error ? err.message : err);
-    supabase = null; // sticky fallback for this instance
-    loadFile();
+    // Supabase unreachable right now (network blip, fresh project without
+    // tables): leave the snapshot empty but keep the client alive so the
+    // next refreshDbIfStale/ensureDbLoaded can retry. (Sticky file fallback
+    // here would serve an empty DB for the instance's whole lifetime.)
+    console.error("[db] supabase hydrate failed — will retry on next read:", err instanceof Error ? err.message : err);
+    if (!cache) cache = {};
   }
 }
 
@@ -230,6 +261,11 @@ export function setSetting(name: string, value: unknown): void {
   updateDb((db) => {
     db[name] = value;
   });
+}
+
+/** Await until every queued mutation has reached Supabase (or the file). */
+export function flushWrites(): Promise<void> {
+  return writeQueue;
 }
 
 /** Test/ops helper — wipes all persisted application data. */

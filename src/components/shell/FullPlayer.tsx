@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ChevronDown,
@@ -21,11 +21,14 @@ import {
   X,
 } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
-import { LyricsView, QueueView } from "@/components/shell/LyricsQueue";
+import { ActiveLyricLine, LyricsView, QueueView } from "@/components/shell/LyricsQueue";
 import { usePlayerStore } from "@/lib/store/player";
 import { useSession } from "@/lib/store/session";
 import { useUi } from "@/lib/store/ui";
 import { formatDuration } from "@/lib/client/fetcher";
+import { useApi } from "@/lib/client/hooks";
+import { slug } from "@/lib/api/normalizers";
+import type { Track } from "@/types";
 
 /* ============================================================
    FULL-SCREEN PLAYER — Spotify-style now-playing: large centred
@@ -76,6 +79,8 @@ function Expanded({
   const store = usePlayerStore.getState();
   const session = useSession();
   const [drawerTab, setDrawerTab] = useState<"now" | "lyrics" | "queue">("lyrics");
+  const [lyricsOpen, setLyricsOpen] = useState(false);
+  const lyricsAnchor = useRef<HTMLDivElement | null>(null);
 
   if (!current) return null;
   const RepeatIcon = repeat === "one" ? Repeat1 : Repeat;
@@ -125,9 +130,13 @@ function Expanded({
         </button>
       </div>
 
-      <div className="flex flex-1 min-h-0 flex-col gap-3 px-5 pb-[max(14px,env(safe-area-inset-bottom))] md:flex-row md:items-stretch md:gap-8 md:px-10">
+      {/* Everything scrolls vertically on mobile: artwork → controls →
+          lyrics → about the artist → explore more. Desktop keeps the
+          side-by-side layout. */}
+      <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-5 pb-[max(24px,env(safe-area-inset-bottom))]">
+      <div className="flex min-h-full flex-col gap-3 md:flex-row md:items-stretch md:gap-8 md:px-5">
         {/* Cover + lyrics-over-artwork, Spotify style */}
-        <div className="relative w-full flex-1 min-h-0 md:aspect-square md:w-full md:max-w-sm md:flex-none md:self-center">
+        <div className="relative aspect-square w-full shrink-0 self-center md:max-w-sm md:flex-none">
           <Artwork
             src={artworkSrc}
             seed={current.id}
@@ -142,18 +151,20 @@ function Expanded({
             </span>
           )}
 
-          {/* Lyrics scrim (mobile) — karaoke-style over the artwork */}
+          {/* Lyrics scrim (mobile) — ONLY the line being sung, big and
+              readable over the artwork; tap scrolls down to the full lyrics
+              section. */}
           {overlay === "lyrics" && (
             <button
               type="button"
-              aria-label="Open full lyrics"
-              onClick={() => setFullView("lyrics")}
-              className="absolute inset-0 z-0 flex flex-col overflow-hidden rounded-lg text-left"
+              aria-label="Scroll to lyrics"
+              onClick={() => lyricsAnchor.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              className="absolute inset-0 z-0 flex flex-col justify-end overflow-hidden rounded-lg text-left"
             >
-              <span className="pointer-events-none absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-black/70 via-black/35 to-transparent" />
-              <LyricsView variant="overlay" className="relative z-10 mt-auto min-h-0 [&>div]:!gap-1.5 [&_p]:!text-[13px]" />
+              <span className="pointer-events-none absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/85 via-black/40 to-transparent" />
+              <ActiveLyricLine className="relative z-10 px-4 pb-6" />
               <span className="relative z-10 flex items-center gap-1 px-4 pb-2.5 text-[10px] font-bold uppercase tracking-[0.14em] text-white/60">
-                <Maximize2 className="size-3" /> Full lyrics
+                <Mic2 className="size-3" /> Lyrics
               </span>
             </button>
           )}
@@ -335,6 +346,34 @@ function Expanded({
             {drawerTab === "queue" && <QueueView />}
           </div>
         </div>
+
+        {/* ---- Mobile-only scroll sections ---- */}
+        <div className="flex flex-col gap-10 pb-6 md:hidden">
+          {/* Lyrics — the full lyrics live here (tap a line to seek). The
+              box is capped so it doesn't dominate; expand for the page-long
+              view without leaving the player. */}
+          <section ref={lyricsAnchor} className="scroll-mt-20">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-base font-extrabold text-ink">Lyrics</h3>
+              <button
+                type="button"
+                onClick={() => setLyricsOpen((v) => !v)}
+                className="rounded-full px-3 py-1 text-[11px] font-bold text-muted hover:bg-white/8 hover:text-ink"
+              >
+                {lyricsOpen ? "Show less" : "Full lyrics"}
+              </button>
+            </div>
+            <div className={`rounded-2xl border border-white/8 bg-white/4 ${lyricsOpen ? "" : "relative max-h-64 overflow-hidden"}`}>
+              <LyricsView variant="panel" className={`rounded-2xl ${lyricsOpen ? "max-h-[70vh]" : "max-h-64"}`} />
+              {!lyricsOpen && (
+                <span className="pointer-events-none absolute inset-x-0 bottom-0 h-16 rounded-b-2xl bg-gradient-to-t from-bg to-transparent" />
+              )}
+            </div>
+          </section>
+
+          <MobileArtistSections current={current} />
+        </div>
+      </div>
       </div>
 
       {/* Full lyrics / queue page — covers the whole player incl. artwork */}
@@ -365,5 +404,101 @@ function Expanded({
         </div>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Mobile scroll sections: about the artist + explore more             */
+
+interface ArtistPayload {
+  artist: { id: string; name: string; image?: string; source: string } | null;
+  tracks: Track[];
+  albums: Array<{ id: string; title: string; artwork: string; artist: string; year?: number; type?: string }>;
+  related: Array<{ id: string; name: string; image?: string }>;
+}
+
+function MobileArtistSections({ current }: { current: Track }) {
+  const artistName = current.artist.split(",")[0]?.trim() ?? "";
+  const artistId = artistName ? `ar_${slug(artistName)}` : "";
+  const data = useApi<ArtistPayload>(artistId ? `/api/music/artist/${encodeURIComponent(artistId)}` : null);
+
+  const artist = data.data?.artist ?? null;
+  const ownTracks = data.data?.tracks ?? [];
+  const ownAlbums = data.data?.albums ?? [];
+
+  if (data.loading) {
+    return (
+      <div className="flex flex-col gap-10">
+        <div className="skeleton h-40 rounded-2xl" />
+        <div className="skeleton h-56 rounded-2xl" />
+      </div>
+    );
+  }
+  if (!artist && !ownTracks.length && !ownAlbums.length) return null;
+
+  return (
+    <>
+      {/* About the artist */}
+      <section>
+        <h3 className="mb-3 text-base font-extrabold text-ink">About the artist</h3>
+        <div className="flex items-center gap-4">
+          {artist?.image && (
+            <Artwork
+              src={artist.image}
+              seed={artist.id}
+              label={artist.name}
+              alt=""
+              className="size-20 shrink-0 rounded-full object-cover shadow-lg shadow-black/40"
+            />
+          )}
+          <div className="min-w-0">
+            <p className="truncate text-sm font-extrabold text-ink">{artist?.name ?? artistName}</p>
+            <p className="mt-0.5 text-xs text-muted">
+              {ownTracks.length > 0 && `${ownTracks.length} song${ownTracks.length === 1 ? "" : "s"} on Lenzo`}
+              {ownTracks.length > 0 && ownAlbums.length > 0 && " · "}
+              {ownAlbums.length > 0 && `${ownAlbums.length} release${ownAlbums.length === 1 ? "" : "s"}`}
+              {!ownTracks.length && !ownAlbums.length && "Artist in your catalogue"}
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Explore more from the artist */}
+      {(ownTracks.length > 0 || ownAlbums.length > 0) && (
+        <section>
+          <h3 className="mb-3 text-base font-extrabold text-ink">Explore {artist?.name ?? artistName}</h3>
+          {ownTracks.length > 0 && (
+            <div className="flex flex-col">
+              {ownTracks.slice(0, 8).map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => usePlayerStore.getState().playTrack(t, ownTracks)}
+                  className="flex items-center gap-3 rounded-xl px-1 py-1.5 text-left hover:bg-white/5"
+                >
+                  <Artwork src={t.artwork} seed={t.id} label={t.title} alt="" className="size-11 shrink-0 rounded-lg object-cover" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold text-ink">{t.title}</span>
+                    <span className="block truncate text-xs text-muted">{t.artist}</span>
+                  </span>
+                  <span className="shrink-0 text-[11px] tabular-nums text-faint">{formatDuration(t.duration)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {ownAlbums.length > 0 && (
+            <div className="mt-3 flex gap-3 overflow-x-auto pb-1 hide-scrollbar">
+              {ownAlbums.slice(0, 10).map((al) => (
+                <a key={al.id} href={`/albums/${encodeURIComponent(al.id)}`} className="group w-24 shrink-0">
+                  <Artwork src={al.artwork} seed={al.id} label={al.title} alt="" className="aspect-square w-full rounded-lg object-cover shadow-md shadow-black/40" />
+                  <span className="mt-1.5 block truncate text-[12px] font-semibold text-ink">{al.title}</span>
+                  <span className="block truncate text-[11px] text-muted">{al.year ?? ""}</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+    </>
   );
 }
