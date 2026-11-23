@@ -100,7 +100,7 @@ function Toast() {
   return (
     <div
       role="status"
-      className={`fixed bottom-[140px] left-1/2 z-[90] -translate-x-1/2 rounded-pill px-4 py-2.5 text-sm font-semibold shadow-xl shadow-black/50 md:bottom-24 ${
+      className={`fixed bottom-[140px] left-1/2 z-[96] -translate-x-1/2 rounded-pill px-4 py-2.5 text-sm font-semibold shadow-xl shadow-black/50 md:bottom-24 ${
         toast.tone === "error"
           ? "bg-danger text-white"
           : toast.tone === "success"

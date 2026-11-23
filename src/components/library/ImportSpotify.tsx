@@ -60,14 +60,14 @@ export default function ImportSpotifyButton({ onImported }: { onImported?: () =>
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:items-center sm:p-6"
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
           onClick={busy ? undefined : close}
           role="dialog"
           aria-modal="true"
           aria-label="Import a Spotify playlist"
         >
           <div
-            className="w-full max-w-md rounded-t-3xl bg-card p-5 shadow-2xl shadow-black/50 sm:rounded-3xl"
+            className="max-h-[88dvh] w-full max-w-md overflow-y-auto rounded-3xl bg-card p-5 shadow-2xl shadow-black/50"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between">
@@ -85,8 +85,11 @@ export default function ImportSpotifyButton({ onImported }: { onImported?: () =>
               onKeyDown={(e) => e.key === "Enter" && void submit()}
               autoFocus
               inputMode="url"
+              enterKeyHint="go"
               placeholder="https://open.spotify.com/playlist/…"
-              className="w-full rounded-xl border border-white/10 bg-surface px-3.5 py-2.5 text-sm text-ink outline-none placeholder:text-faint focus:border-electric"
+              // text-base on phones: iOS zoom-jumps the viewport on focus
+              // for inputs under 16px, which yanked the layout around.
+              className="w-full rounded-xl border border-white/10 bg-surface px-3.5 py-2.5 text-base text-ink outline-none placeholder:text-faint focus:border-electric sm:text-sm"
             />
             <button
               type="button"
