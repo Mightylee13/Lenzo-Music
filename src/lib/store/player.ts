@@ -53,6 +53,7 @@ interface PlayerState {
   setVolume: (v: number) => void;
   toggleMute: () => void;
   toggleShuffle: () => void;
+  setShuffle: (on: boolean) => void;
   cycleRepeat: () => void;
   addToQueue: (track: Track) => void;
   playNext: (track: Track) => void;
@@ -70,6 +71,15 @@ let audio: HTMLAudioElement | null = null;
 let resolveToken = 0;
 let failureStreak = 0;
 const resolvedCache = new Map<string, ResolvedAudio>();
+/** Cap resolution cache so long listening sessions can't grow it unbounded. */
+const RESOLVED_CACHE_MAX = 120;
+function cacheResolved(trackId: string, audio: ResolvedAudio): void {
+  if (resolvedCache.size >= RESOLVED_CACHE_MAX) {
+    const oldest = resolvedCache.keys().next().value;
+    if (oldest !== undefined) resolvedCache.delete(oldest);
+  }
+  resolvedCache.set(trackId, audio);
+}
 
 /** Seconds before track end at which the next track starts loading. */
 const PRELOAD_AHEAD_SEC = 45;
@@ -213,7 +223,7 @@ export async function resolveAudio(track: Track, force = false): Promise<Resolve
         throw new Error(body?.error ?? `Audio resolution failed (${res.status})`);
       }
       const data = (await res.json()) as { audio: ResolvedAudio };
-      resolvedCache.set(track.id, data.audio);
+      cacheResolved(track.id, data.audio);
       return data.audio;
     })
     .finally(() => inflight.delete(track.id));
@@ -371,7 +381,23 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
   });
 
   try {
-    const resolved = await resolveAudio(track);
+    // Prefer the device's stored copy of this song when it exists: the
+    // URL never expires, so control-center play/pause still works after a
+    // long background pause (expired signed CDN links play silence while
+    // the frozen PWA can't re-resolve), and replays start instantly.
+    let resolved: ResolvedAudio;
+    const cachedLocal = await offlineStreamSource(track.id);
+    if (cachedLocal) {
+      resolved = {
+        audioUrl: cachedLocal,
+        artwork: track.artwork,
+        duration: track.duration,
+        provider: "ytmp3",
+      } as ResolvedAudio;
+      cacheResolved(track.id, resolved);
+    } else {
+      resolved = await resolveAudio(track);
+    }
     if (token !== resolveToken) return; // user skipped ahead while resolving
 
     usePlayerStore.setState({ resolved, lyrics: resolved.lyrics ?? null });
@@ -716,6 +742,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   },
 
   toggleShuffle: () => set({ shuffle: !get().shuffle }),
+  setShuffle: (on) => set({ shuffle: on }),
 
   cycleRepeat: () => {
     const order: RepeatMode[] = ["off", "all", "one"];

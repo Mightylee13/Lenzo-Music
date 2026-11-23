@@ -42,7 +42,7 @@ export function TrackCollectionHeader({
               type="button"
               onClick={() => {
                 const store = usePlayerStore.getState();
-                store.toggleShuffle();
+                store.setShuffle(true);
                 store.playQueue(tracks, Math.floor(Math.random() * tracks.length));
               }}
               className="flex items-center gap-2 rounded-pill border border-hairline px-5 py-3 text-sm font-bold text-ink transition hover:bg-white/6"

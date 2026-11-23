@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, GripVertical, Trash2, X } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
 import { usePlayerStore } from "@/lib/store/player";
@@ -99,10 +99,17 @@ export function LyricsView({ className = "", variant = "panel" }: { className?: 
     return idx;
   }, [lines, progress, timed]);
 
+  // Pause auto-scroll for a few seconds after the user scrolls manually,
+  // so reading ahead isn't yanked back to the active line.
+  const userScrollUntil = useRef(0);
+  const handleUserScroll = useCallback(() => {
+    userScrollUntil.current = Date.now() + 5000;
+  }, []);
+
   useEffect(() => {
     const el = activeRef.current;
     const box = container.current;
-    if (el && box && activeIndex >= 0) {
+    if (el && box && activeIndex >= 0 && Date.now() >= userScrollUntil.current) {
       box.scrollTo({ top: el.offsetTop - box.clientHeight * 0.35, behavior: "smooth" });
     }
   }, [activeIndex]);
@@ -122,7 +129,7 @@ export function LyricsView({ className = "", variant = "panel" }: { className?: 
   }
 
   return (
-    <div ref={container} className={`scrollbar-thin overflow-y-auto px-4 py-4 ${className}`}>
+    <div ref={container} onWheel={handleUserScroll} onTouchStart={handleUserScroll} onPointerDown={handleUserScroll} className={`scrollbar-thin overflow-y-auto px-4 py-4 ${className}`}>
       <div className="flex flex-col gap-3">
         {lines.map((line, i) => {
           const active = i === activeIndex;

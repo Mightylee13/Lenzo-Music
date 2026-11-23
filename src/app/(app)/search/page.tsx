@@ -251,6 +251,19 @@ function SearchInner() {
       )}
 
       {/* Results — cached ones render instantly while a fresh fetch runs. */}
+      {searching && !view && (
+        <div className="flex flex-col gap-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-3 rounded-card bg-card p-3">
+              <div className="size-14 shrink-0 animate-pulse rounded-lg bg-white/8" />
+              <div className="flex flex-1 flex-col gap-2">
+                <div className="h-3 w-2/5 animate-pulse rounded bg-white/8" />
+                <div className="h-3 w-1/4 animate-pulse rounded bg-white/8" />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {(view || results.error) && (
         <>
           {results.error && <ErrorState message={`${results.error} — try another source.`} onRetry={results.reload} />}

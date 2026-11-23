@@ -110,7 +110,7 @@ function ArtistRadio({ artists }: { artists: { id: string; name: string; image: 
             const res = await fetch(`/api/music/search?q=${encodeURIComponent(a.name)}&source=soundcloud&limit=50`).then((r) => r.json()).catch(() => null);
             const tracks: Track[] = res?.results?.tracks ?? [];
             if (tracks.length) {
-              usePlayerStore.getState().toggleShuffle();
+              usePlayerStore.getState().setShuffle(true);
               usePlayerStore.getState().playQueue(tracks, Math.floor(Math.random() * Math.min(tracks.length, 10)));
             }
           }}
@@ -140,7 +140,7 @@ function StationPlayback({ station, onDone }: { station: { id: string; name: str
           type="button"
           onClick={() => {
             if (!tracks.length) return;
-            usePlayerStore.getState().toggleShuffle();
+            usePlayerStore.getState().setShuffle(true);
             usePlayerStore.getState().playQueue(tracks, Math.floor(Math.random() * Math.min(tracks.length, 10)));
             onDone();
           }}

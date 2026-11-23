@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Heart, MoreHorizontal, Pause, Play } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
 import TrackSheet from "@/components/tracks/TrackSheet";
@@ -53,6 +54,7 @@ export default function TrackList({
   emptyMessage = "Nothing here yet.",
 }: TrackListProps) {
   const [sheetTrack, setSheetTrack] = useState<Track | null>(null);
+  const router = useRouter();
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const current = usePlayerStore((s) => s.current);
   const playTrack = usePlayerStore((s) => s.playTrack);
@@ -188,13 +190,26 @@ export default function TrackList({
                   </span>
                   <span className="block truncate text-xs text-muted">
                     {track.artistId ? (
-                      <Link
-                        href={`/artists/${track.artistId}`}
-                        className="hover:text-ink hover:underline"
-                        onClick={(e) => e.stopPropagation()}
+                      // A real <Link> can't live inside the row <button>, so
+                      // navigate programmatically instead (valid HTML, same UX).
+                      <span
+                        role="link"
+                        tabIndex={0}
+                        className="cursor-pointer hover:text-ink hover:underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(`/artists/${track.artistId}`);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            router.push(`/artists/${track.artistId}`);
+                          }
+                        }}
                       >
                         {track.artist}
-                      </Link>
+                      </span>
                     ) : (
                       track.artist
                     )}
@@ -237,7 +252,9 @@ export default function TrackList({
                       }
                     }}
                     className={`grid size-8 place-items-center rounded-full transition-colors hover:bg-white/8 ${
-                      session.isLiked(track.id) ? "text-danger" : "text-faint opacity-0 group-hover:opacity-100 focus-visible:opacity-100 md:opacity-0"
+                      session.isLiked(track.id)
+                        ? "text-danger"
+                        : "text-faint md:opacity-0 md:group-hover:opacity-100 focus-visible:opacity-100"
                     }`}
                   >
                     <Heart className={`size-4 ${session.isLiked(track.id) ? "fill-current" : ""}`} />

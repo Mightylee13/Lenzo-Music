@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ListMusic, Mic2, Radio, User } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
@@ -11,13 +10,13 @@ import { useUi } from "@/lib/store/ui";
 
 /* ============================================================
    RIGHT PANEL — desktop now-playing dock: artwork, artist follow,
-   lyrics and queue. Collapsible.
+   lyrics and queue. Collapsible. The tab comes from the player
+   store so the player-bar Lyrics/Queue buttons drive it too.
    ============================================================ */
 
-type Tab = "now" | "lyrics" | "queue";
-
 export default function RightPanel() {
-  const [tab, setTab] = useState<Tab>("now");
+  const tab = usePlayerStore((s) => s.panelTab);
+  const setTab = usePlayerStore((s) => s.setPanelTab);
   const current = usePlayerStore((s) => s.current);
   const resolved = usePlayerStore((s) => s.resolved);
   const session = useSession();

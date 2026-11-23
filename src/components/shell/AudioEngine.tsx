@@ -53,6 +53,10 @@ export default function AudioEngine() {
       // Never hijack keys while typing in inputs.
       if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
       if (target?.isContentEditable) return;
+      // Never hijack keys pressed on interactive elements (Space on a focused button should click it).
+      const onInteractive = target?.closest?.("button, a, [role='button'], input, select, [contenteditable]") as HTMLElement | null;
+      const isSpace = e.key === " ";
+      if (isSpace && onInteractive) return;
 
       const p = usePlayerStore.getState();
       switch (e.key) {

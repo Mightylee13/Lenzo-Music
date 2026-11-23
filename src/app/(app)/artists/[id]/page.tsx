@@ -25,6 +25,8 @@ export default function ArtistPage() {
   const { data, loading, error, reload } = useApi<Payload>(id ? `/api/music/artist/${encodeURIComponent(id)}` : null);
   const session = useSession();
   const ui = useUi();
+  // Hooks must all run before any conditional return (React rules).
+  const shuffleOn = usePlayerStore((s) => s.shuffle);
 
   if (loading) return <div className="animate-fade-in"><BannerSkeleton /></div>;
   if (error)
@@ -61,7 +63,6 @@ export default function ArtistPage() {
 
   const following = session.isFollowingArtist(artist.id);
   const tracks = data?.tracks ?? [];
-  const shuffleOn = usePlayerStore((s) => s.shuffle);
   const albums = data?.albums ?? [];
 
   // Real collaborators: other artist names credited on this artist's tracks.

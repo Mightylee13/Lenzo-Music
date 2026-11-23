@@ -25,17 +25,23 @@ interface FetchState<T> {
 export function useApi<T>(url: string | null): FetchState<T> & { reload: () => void } {
   const [state, setState] = useState<FetchState<T>>({ data: null, loading: true, error: null });
   const [nonce, setNonce] = useState(0);
+  const lastUrl = useRef<string | null>(null);
 
   useEffect(() => {
     if (!url) {
+      lastUrl.current = null;
       setState({ data: null, loading: false, error: null });
       return;
     }
     let cancelled = false;
+    const urlChanged = lastUrl.current !== url;
+    lastUrl.current = url;
     // Repaint the previous response from the device cache immediately;
     // the network fetch below still refreshes it.
     const cached = readCache<T>(url);
-    setState((s) => ({ data: cached ?? s.data, loading: !cached, error: null }));
+    // When the URL changed, the old response belongs to a different page —
+    // never paint it to avoid flashing wrong content.
+    setState((s) => ({ data: urlChanged ? cached : (cached ?? s.data), loading: !cached, error: null }));
     fetch(url, { headers: { Accept: "application/json" } })
       .then(async (res) => {
         const body = await res.json().catch(() => null);

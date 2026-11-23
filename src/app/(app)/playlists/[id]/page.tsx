@@ -167,6 +167,7 @@ export default function PlaylistDetailPage() {
                       className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-xs font-semibold text-danger hover:bg-white/5"
                       onClick={async () => {
                         setMenuOpen(false);
+                        if (!window.confirm("Delete this playlist permanently? This cannot be undone.")) return;
                         try {
                           await apiSend(`/api/playlists/${id}`, "DELETE");
                           useUi.getState().showToast("Playlist deleted", "success");

@@ -84,6 +84,8 @@ export default function LyricsPage() {
             step={0.1}
             value={shown}
             aria-label="Seek"
+            className="bw-range h-3 w-full"
+            style={{ ["--range-progress" as string]: `${(shown / max) * 100}%` }}
             onChange={(e) => setScrubbing(Number(e.target.value))}
             onPointerUp={() => {
               if (scrubbing !== null) usePlayerStore.getState().seek(scrubbing);
@@ -97,7 +99,6 @@ export default function LyricsPage() {
               if (scrubbing !== null) usePlayerStore.getState().seek(scrubbing);
               setScrubbing(null);
             }}
-            className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-[#398CFF]"
           />
           <div className="flex justify-between text-[10px] tabular-nums text-faint">
             <span>{formatDuration(shown)}</span>

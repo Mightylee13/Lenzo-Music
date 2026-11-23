@@ -60,6 +60,7 @@ export default function DownloadsPage() {
           <button
             type="button"
             onClick={async () => {
+              if (!window.confirm(`Remove all ${tracks.length} downloaded songs?`)) return;
               for (const t of [...tracks]) {
                 await session.toggleDownload(t).catch(() => undefined);
               }

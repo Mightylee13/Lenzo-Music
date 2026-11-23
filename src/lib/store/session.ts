@@ -63,6 +63,24 @@ function feature(this_: SessionState | null, key: string): boolean {
 
 let lastRecentPushId = "";
 
+const ME_CACHE_KEY = "lenzo.session.me";
+const LIBRARY_CACHE_KEY = "lenzo.session.library";
+
+function readCache<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch { /* best-effort */ }
+}
+
 export const useSession = create<SessionState>((set, get) => ({  ready: false,
   user: null,
   app: null,
@@ -76,12 +94,32 @@ export const useSession = create<SessionState>((set, get) => ({  ready: false,
   },
 
   bootstrap: async () => {
+    // Paint the last known session immediately (device cache) so going
+    // offline never "logs the user out".
+    const cachedMe = readCache<{ user: PublicUser | null; app: unknown }>(ME_CACHE_KEY);
+    if (cachedMe) set({ user: cachedMe.user ?? null, app: (cachedMe.app as SessionState["app"]) ?? null });
+    const cachedLibrary = readCache<FullUser>(LIBRARY_CACHE_KEY);
+    if (cachedLibrary?.likedTracks) {
+      set((s) => ({
+        library: {
+          likedTracks: cachedLibrary.likedTracks ?? s.library.likedTracks,
+          savedAlbums: cachedLibrary.savedAlbums ?? s.library.savedAlbums,
+          followedArtists: cachedLibrary.followedArtists ?? s.library.followedArtists,
+          followedPodcasts: cachedLibrary.followedPodcasts ?? s.library.followedPodcasts,
+          recentlyPlayed: cachedLibrary.recentlyPlayed ?? s.library.recentlyPlayed,
+          downloads: cachedLibrary.downloads ?? s.library.downloads,
+        },
+      }));
+    }
+    if (cachedMe || cachedLibrary) set({ ready: true });
     try {
       const me = await apiGet<MeResponse>("/api/auth/me");
       set({ user: me.user, app: me.app });
+      writeCache(ME_CACHE_KEY, { user: me.user, app: me.app });
       if (me.user) {
         const library = await apiGet<FullUser>("/api/library").catch(() => null);
         if (library) {
+          writeCache(LIBRARY_CACHE_KEY, library);
           set((s) => ({
             library: {
               likedTracks: library.likedTracks ?? [],
@@ -94,6 +132,8 @@ export const useSession = create<SessionState>((set, get) => ({  ready: false,
           }));
         }
       }
+    } catch {
+      // Network/API down: the cached session above stays painted.
     } finally {
       set({ ready: true });
     }

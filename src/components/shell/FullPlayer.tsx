@@ -81,11 +81,12 @@ function Expanded({
   const session = useSession();
   const [drawerTab, setDrawerTab] = useState<"now" | "lyrics" | "queue">("lyrics");
   const lyricsAnchor = useRef<HTMLDivElement | null>(null);
+  // Scrub locally, commit the seek on pointer release.
+  const [scrub, setScrub] = useState<number | null>(null);
 
   if (!current) return null;
   const RepeatIcon = repeat === "one" ? Repeat1 : Repeat;
   const VolumeIcon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
-  const pct = duration > 0 ? (progress / duration) * 100 : 0;
   const artworkSrc = resolved?.artwork ?? current.artwork;
 
   return (
@@ -230,15 +231,30 @@ function Expanded({
               type="range"
               aria-label="Seek"
               className="bw-range h-3 w-full"
-              style={{ ["--range-progress" as string]: `${pct}%` }}
-              value={progress}
+              style={{ ["--range-progress" as string]: `${((scrub ?? progress) / (duration || 1)) * 100}%` }}
+              value={scrub ?? progress}
               max={duration || 1}
-              onChange={(e) => store.seek(Number(e.target.value))}
-              onMouseDown={() => usePlayerStore.setState({ seeking: true })}
+              onChange={(e) => setScrub(Number(e.target.value))}
+              onPointerUp={() => {
+                if (scrub !== null) usePlayerStore.setState({ seeking: true });
+                if (scrub !== null) store.seek(scrub);
+                setScrub(null);
+                usePlayerStore.setState({ seeking: false });
+              }}
+              onTouchEnd={() => {
+                if (scrub !== null) store.seek(scrub);
+                setScrub(null);
+                usePlayerStore.setState({ seeking: false });
+              }}
+              onMouseUp={() => {
+                if (scrub !== null) store.seek(scrub);
+                setScrub(null);
+                usePlayerStore.setState({ seeking: false });
+              }}
             />
             <div className="flex justify-between text-[10px] tabular-nums text-faint">
-              <span>{formatDuration(progress)}</span>
-              <span>{formatDuration(Math.max(0, duration - progress))}</span>
+              <span>{formatDuration(scrub ?? progress)}</span>
+              <span>{formatDuration(Math.max(0, duration - (scrub ?? progress)))}</span>
             </div>
           </div>
 

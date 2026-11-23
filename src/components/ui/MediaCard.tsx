@@ -49,7 +49,7 @@ export default function MediaCard({ artwork, seed, label, title, subtitle, badge
               onPlay();
             }}
             className={`absolute right-2 bottom-2 grid size-10 place-items-center rounded-full bg-electric text-white shadow-xl shadow-black/50 transition-all duration-200 hover:scale-105 hover:bg-cyan active:scale-95 md:right-2.5 md:bottom-2.5 md:size-11 ${
-              active ? "opacity-100" : "translate-y-1.5 opacity-0 group-hover:translate-y-0 group-hover:opacity-100 md:opacity-0"
+              active || !href ? "opacity-100" : "opacity-100 md:translate-y-1.5 md:opacity-0 md:group-hover:translate-y-0 md:group-hover:opacity-100"
             } focus-visible:translate-y-0 focus-visible:opacity-100`}
           >
             <Play className="size-5 fill-current" />

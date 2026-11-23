@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 import {
   Heart,
   ListMusic,
@@ -46,7 +47,11 @@ export default function BottomPlayer() {
   const rightPanel = useUi((s) => s.rightPanelVisible);
   const pathname = usePathname();
 
-  const pct = duration > 0 ? (progress / duration) * 100 : 0;
+  // Scrub locally, commit the seek on release — dragging no longer fires
+  // seeks at every tick and the progress bar can never freeze.
+  const [scrub, setScrub] = useState<number | null>(null);
+  const scrubPct = duration > 0 ? ((scrub ?? progress) / duration) * 100 : 0;
+
   const busy = status === "resolving";
 
   // The lyrics page has its own always-visible transport dock.
@@ -138,16 +143,27 @@ export default function BottomPlayer() {
           </button>
         </div>
         <div className="flex w-full max-w-xl items-center gap-2">
-          <span className="w-9 text-right text-[10px] tabular-nums text-faint">{formatDuration(progress)}</span>
+          <span className="w-9 text-right text-[10px] tabular-nums text-faint">{formatDuration(scrub ?? progress)}</span>
           <input
             type="range"
             aria-label="Seek"
             className="bw-range h-3 min-w-0 flex-1"
-            style={{ ["--range-progress" as string]: `${pct}%` }}
-            value={progress}
+            style={{ ["--range-progress" as string]: `${scrubPct}%` }}
+            value={scrub ?? progress}
             max={duration || 1}
-            onChange={(e) => store.seek(Number(e.target.value))}
-            onMouseDown={() => usePlayerStore.setState({ seeking: true })}
+            onChange={(e) => setScrub(Number(e.target.value))}
+            onPointerUp={() => {
+              if (scrub !== null) store.seek(scrub);
+              setScrub(null);
+            }}
+            onTouchEnd={() => {
+              if (scrub !== null) store.seek(scrub);
+              setScrub(null);
+            }}
+            onMouseUp={() => {
+              if (scrub !== null) store.seek(scrub);
+              setScrub(null);
+            }}
           />
           <span className="w-9 text-[10px] tabular-nums text-faint">{formatDuration(duration)}</span>
         </div>

@@ -5,7 +5,7 @@ import { useMemo } from "react";
 import { Clock3, Flame, Heart, Sparkles } from "lucide-react";
 import MediaCard from "@/components/ui/MediaCard";
 import Section from "@/components/ui/Section";
-import { CardSkeleton } from "@/components/ui/skeletons";
+import { CardSkeleton, ErrorState } from "@/components/ui/skeletons";
 import { useApi } from "@/lib/client/hooks";
 import { greeting } from "@/lib/client/fetcher";
 import { albumTypeLabel } from "@/lib/labels";
@@ -66,6 +66,11 @@ export default function HomePage() {
       {/* Hero featured playlist */}
       {shell.data?.featured && <FeaturedHero playlist={shell.data.featured} />}
 
+      {/* Whole-feed failure — cached shelves may still show above */}
+      {shell.error && !shell.data && (
+        <ErrorState message={`Home failed to load — ${shell.error}`} onRetry={shell.reload} />
+      )}
+
       {/* Sections, in admin order, each loading independently */}
       {shell.data?.sections.map((descriptor) =>
         descriptor.payload ? (
@@ -89,8 +94,12 @@ function RemoteSection({ id, title }: { id: string; title: string }) {
     return (
       <section>
         <h2 className="mb-3 text-sm font-bold text-ink">{title}</h2>
-        <div className="grid grid-cols-3 gap-3 md:grid-cols-5 lg:grid-cols-6">
-          <CardSkeleton count={6} />
+        <div className="hide-scrollbar flex snap-x snap-mandatory gap-3 overflow-x-auto md:gap-4">
+          {[0, 1, 2, 3, 4, 5].map((n) => (
+            <div key={n} className="w-[7.5rem] shrink-0 md:w-[10.5rem]">
+              <CardSkeleton count={1} />
+            </div>
+          ))}
         </div>
       </section>
     );
@@ -104,16 +113,16 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
     return (
       <RenderSection title={payload.title}>
         {payload.tracks.map((track) => (
-          <MediaCard
-            key={track.id}
-            artwork={track.artwork}
-            seed={track.id}
-            label={track.title}
-            title={track.title}
-            subtitle={track.artist}
-            onPlay={() => usePlayerStore.getState().playTrack(track, payload.tracks ?? [])}
-           
-          />
+          <Tile key={track.id}>
+            <MediaCard
+              artwork={track.artwork}
+              seed={track.id}
+              label={track.title}
+              title={track.title}
+              subtitle={track.artist}
+              onPlay={() => usePlayerStore.getState().playTrack(track, payload.tracks ?? [])}
+            />
+          </Tile>
         ))}
       </RenderSection>
     );
@@ -122,17 +131,17 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
     return (
       <RenderSection title={payload.title} href="/playlists">
         {payload.playlists.map((pl) => (
-          <MediaCard
-            key={pl.id}
-            artwork={pl.artwork}
-            seed={pl.id}
-            label={pl.name}
-            title={pl.name}
-            subtitle={`Playlist · ${pl.owner}`}
-            badge="Playlist"
-            href={`/playlists/${pl.id}`}
-           
-          />
+          <Tile key={pl.id}>
+            <MediaCard
+              artwork={pl.artwork}
+              seed={pl.id}
+              label={pl.name}
+              title={pl.name}
+              subtitle={`Playlist · ${pl.owner}`}
+              badge="Playlist"
+              href={`/playlists/${pl.id}`}
+            />
+          </Tile>
         ))}
       </RenderSection>
     );
@@ -141,17 +150,17 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
     return (
       <RenderSection title={payload.title} href="/explore">
         {payload.albums.map((al) => (
-          <MediaCard
-            key={al.id}
-            artwork={al.artwork}
-            seed={al.id}
-            label={al.title}
-            title={al.title}
-            subtitle={`${al.artist}${al.year ? ` · ${al.year}` : ""}`}
-            badge={albumTypeLabel(al.type)}
-            href={`/albums/${al.id}`}
-           
-          />
+          <Tile key={al.id}>
+            <MediaCard
+              artwork={al.artwork}
+              seed={al.id}
+              label={al.title}
+              title={al.title}
+              subtitle={`${al.artist}${al.year ? ` · ${al.year}` : ""}`}
+              badge={albumTypeLabel(al.type)}
+              href={`/albums/${al.id}`}
+            />
+          </Tile>
         ))}
       </RenderSection>
     );
@@ -160,18 +169,18 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
     return (
       <RenderSection title={payload.title} href="/discover">
         {payload.artists.map((ar) => (
-          <MediaCard
-            key={ar.id}
-            artwork={ar.image}
-            seed={ar.id}
-            label={ar.name}
-            title={ar.name}
-            subtitle="Artist"
-            badge="Artist"
-            round
-            href={`/artists/${ar.id}`}
-           
-          />
+          <Tile key={ar.id}>
+            <MediaCard
+              artwork={ar.image}
+              seed={ar.id}
+              label={ar.name}
+              title={ar.name}
+              subtitle="Artist"
+              badge="Artist"
+              round
+              href={`/artists/${ar.id}`}
+            />
+          </Tile>
         ))}
       </RenderSection>
     );
@@ -180,15 +189,15 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
     return (
       <RenderSection title={payload.title} href="/discover">
         {payload.tracks.slice(0, 14).map((track, i, arr) => (
-          <MediaCard
-            key={track.id}
-            artwork={track.artwork}
-            seed={track.id}
-            title={`#${i + 1} ${track.title}`}
-            subtitle={track.artist}
-            onPlay={() => usePlayerStore.getState().playTrack(track, arr)}
-           
-          />
+          <Tile key={track.id}>
+            <MediaCard
+              artwork={track.artwork}
+              seed={track.id}
+              title={`#${i + 1} ${track.title}`}
+              subtitle={track.artist}
+              onPlay={() => usePlayerStore.getState().playTrack(track, arr.slice(i))}
+            />
+          </Tile>
         ))}
       </RenderSection>
     );
@@ -198,10 +207,15 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
 
 function RenderSection({ title, href, children }: { title: string; href?: string; children: React.ReactNode }) {
   return (
-    <Section title={title} href={href} variant="grid">
+    <Section title={title} href={href}>
       {children}
     </Section>
   );
+}
+
+/** Fixed-width compact tile so shelves swipe left/right like Spotify. */
+function Tile({ children }: { children: React.ReactNode }) {
+  return <div className="w-[7.5rem] shrink-0 snap-start md:w-[10.5rem]">{children}</div>;
 }
 
 /* ---------- pieces ---------- */
@@ -220,39 +234,31 @@ function QuickTile({ href, icon, title, note }: { href: string; icon: React.Reac
 
 function FeaturedHero({ playlist }: { playlist: Playlist }) {
   return (
-    <Link
-      href={`/playlists/${playlist.id}`}
-      className="group relative block overflow-hidden rounded-2xl border border-white/8 surface-gradient shadow-xl shadow-black/40"
-    >
-      <div className="flex items-center gap-4 p-4 md:gap-6 md:p-6">
-        <img
-          src={playlist.artwork}
-          alt=""
-          loading="lazy"
-          className="size-20 shrink-0 rounded-xl object-cover shadow-lg shadow-black/50 md:size-32"
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-cyan">Featured playlist</p>
-          <h2 className="mt-1 truncate text-xl font-extrabold tracking-tight text-ink md:text-3xl">{playlist.name}</h2>
-          <p className="mt-1 line-clamp-2 text-xs text-muted md:text-sm">{playlist.description || `${playlist.tracks.length} hand-picked tracks`}</p>
-          <div className="mt-3 flex items-center gap-2">
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label={`Play ${playlist.name}`}
-              onClick={(e) => {
-                e.preventDefault();
-                usePlayerStore.getState().playQueue(playlist.tracks, 0);
-              }}
-              onKeyDown={(e) => e.key === "Enter" && usePlayerStore.getState().playQueue(playlist.tracks, 0)}
-              className="grid size-11 place-items-center rounded-full bg-electric text-white shadow-lg transition hover:scale-105 hover:bg-cyan"
-            >
-              <svg viewBox="0 0 24 24" className="ml-0.5 size-5 fill-current"><path d="M8 5v14l11-7z" /></svg>
-            </span>
-            <span className="text-xs font-semibold text-muted">{playlist.tracks.length} songs</span>
+    <div className="relative overflow-hidden rounded-2xl border border-white/8 surface-gradient shadow-xl shadow-black/40">
+      <Link href={`/playlists/${playlist.id}`} className="group block">
+        <div className="flex items-center gap-4 p-4 pr-16 md:gap-6 md:p-6 md:pr-24">
+          <img
+            src={playlist.artwork}
+            alt=""
+            loading="lazy"
+            className="size-20 shrink-0 rounded-xl object-cover shadow-lg shadow-black/50 md:size-32"
+          />
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-cyan">Featured playlist</p>
+            <h2 className="mt-1 truncate text-xl font-extrabold tracking-tight text-ink md:text-3xl">{playlist.name}</h2>
+            <p className="mt-1 line-clamp-2 text-xs text-muted md:text-sm">{playlist.description || `${playlist.tracks.length} hand-picked tracks`}</p>
+            <span className="mt-3 block text-xs font-semibold text-muted">{playlist.tracks.length} songs</span>
           </div>
         </div>
-      </div>
-    </Link>
+      </Link>
+      <button
+        type="button"
+        aria-label={`Play ${playlist.name}`}
+        onClick={() => usePlayerStore.getState().playQueue(playlist.tracks, 0)}
+        className="absolute right-4 top-1/2 grid size-11 -translate-y-1/2 place-items-center rounded-full bg-electric text-white shadow-lg transition hover:scale-105 hover:bg-cyan md:right-6"
+      >
+        <svg viewBox="0 0 24 24" className="ml-0.5 size-5 fill-current"><path d="M8 5v14l11-7z" /></svg>
+      </button>
+    </div>
   );
 }

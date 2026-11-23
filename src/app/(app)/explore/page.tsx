@@ -56,7 +56,7 @@ export function ExploreGenre({ genreId }: { genreId: string }) {
             disabled={!data.data?.results.tracks.length}
             onClick={() => {
               const store = usePlayerStore.getState();
-              store.toggleShuffle();
+              store.setShuffle(true);
               const tracks = [...(data.data?.results.tracks ?? [])];
               if (tracks.length) {
                 const i = Math.floor(Math.random() * tracks.length);
