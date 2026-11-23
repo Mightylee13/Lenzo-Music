@@ -1,26 +1,242 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* ============================================================
+   BLUEWAVE / LENZO MUSIC — DESIGN SYSTEM
+   Deep navy canvas + electric blue accents.
+   Every token below maps to a Tailwind utility:
+     --color-x  -> bg-x, text-x, border-x
+   ============================================================ */
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+@theme {
+  /* Surfaces */
+  --color-bg: #070d1a;
+  --color-bg2: #0b1425;
+  --color-sidebar: #091222;
+  --color-card: #101d32;
+  --color-elevated: #162541;
+  --color-hairline: #1c2c47;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  /* Brand */
+  --color-brand: #287bff;
+  --color-electric: #398cff;
+  --color-cyan: #52c8ff;
+  --color-ice: #b7deff;
+
+  /* Text */
+  --color-ink: #f5f8ff;
+  --color-muted: #94a7c3;
+  --color-faint: #64769a;
+
+  /* Feedback */
+  --color-danger: #ff5c7a;
+  --color-success: #3ddc97;
+  --color-warning: #ffb648;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-manrope), var(--font-inter), ui-sans-serif, sans-serif;
+
+  /* Radius */
+  --radius-card: 14px;
+  --radius-pill: 999px;
+
+  /* Animation */
+  --animate-fade-in: fade-in 0.28s ease both;
+  --animate-slide-up: slide-up 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-slide-right: slide-right 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-equalizer: equalizer 1s ease-in-out infinite;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes slide-right {
+    from {
+      opacity: 0;
+      transform: translateX(-12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+  @keyframes shimmer {
+    from {
+      background-position: -200% 0;
+    }
+    to {
+      background-position: 200% 0;
+    }
+  }
+  @keyframes equalizer {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+    }
+    50% {
+      transform: scaleY(1);
+    }
   }
 }
 
+/* ---------- Base ---------- */
+
+* {
+  border-color: var(--color-hairline);
+}
+
+html {
+  color-scheme: dark;
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  overscroll-behavior: none;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-brand) 45%, transparent);
+  color: #fff;
+}
+
+/* ---------- Focus ring (accessibility) ---------- */
+
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-cyan);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ---------- Scrollbars ---------- */
+
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #24344f transparent;
+}
+
+/* ---------- Utilities ---------- */
+
+@utility glass {
+  background: color-mix(in srgb, #0b1425 78%, transparent);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+}
+
+@utility glass-strong {
+  background: color-mix(in srgb, #091222 88%, transparent);
+  backdrop-filter: blur(32px) saturate(160%);
+  -webkit-backdrop-filter: blur(32px) saturate(160%);
+}
+
+@utility text-gradient {
+  background: linear-gradient(96deg, #52c8ff 0%, #398cff 48%, #287bff 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@utility surface-gradient {
+  background: linear-gradient(158deg, #162541 0%, #101d32 55%, #0d1729 100%);
+}
+
+@utility hide-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@utility mask-fade-x {
+  mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+}
+
+/* Skeleton shimmer */
+@utility skeleton {
+  background: linear-gradient(90deg, #101d32 25%, #1a2b47 50%, #101d32 75%);
+  background-size: 200% 100%;
+  animation: var(--animate-shimmer);
+}
+
+/* Range inputs (progress + volume) */
+input[type="range"].bw-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].bw-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--range-fill, #398cff) 0%,
+    var(--range-fill, #398cff) var(--range-progress, 0%),
+    #24344f var(--range-progress, 0%),
+    #24344f 100%
+  );
+}
+
+input[type="range"].bw-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: #24344f;
+}
+
+input[type="range"].bw-range::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--range-fill, #398cff);
+}
+
+input[type="range"].bw-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 999px;
+  background: #f5f8ff;
+  box-shadow: 0 0 0 0 color-mix(in srgb, #52c8ff 60%, transparent);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+input[type="range"].bw-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 999px;
+  background: #f5f8ff;
+}
+
+input[type="range"].bw-range:hover::-webkit-slider-thumb {
+  transform: scale(1.25);
+  box-shadow: 0 0 0 6px color-mix(in srgb, #52c8ff 22%, transparent);
+}
+
+input[type="range"].bw-range:focus-visible {
+  outline: none;
 }

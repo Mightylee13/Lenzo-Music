@@ -1,0 +1,500 @@
+import { create } from "zustand";
+import type { RepeatMode, ResolvedAudio, Track } from "@/types";
+import { useUi } from "@/lib/store/ui";
+
+/* ============================================================
+   PLAYER STORE
+   ------------------------------------------------------------
+   Owns the queue, playback state and the resolution pipeline.
+
+   Playback strategy (per project requirements):
+     1. The full track is resolved server-side through the
+        Spotify v2 / ytmp3 converters — never a 30s preview.
+     2. While resolving, the UI shows a real "loading" state.
+     3. Only complete audio sources are ever handed to <audio>;
+        if resolution fails, the player says so honestly.
+
+   The single <audio> element lives in <AudioEngine/> and is handed
+   to this store through `attachAudio`.
+   ============================================================ */
+
+export type PlayerStatus = "idle" | "resolving" | "ready" | "playing" | "paused" | "error";
+
+interface PlayerState {
+  queue: Track[];
+  index: number;
+  current: Track | null;
+  resolved: ResolvedAudio | null;
+  status: PlayerStatus;
+  isPlaying: boolean;
+  progress: number;
+  duration: number;
+  volume: number;
+  muted: boolean;
+  shuffle: boolean;
+  repeat: RepeatMode;
+  error: string | null;
+  lyrics: string | null;
+  expanded: boolean;
+  panelTab: "now" | "lyrics" | "queue";
+  seeking: boolean;
+
+  attachAudio: (el: HTMLAudioElement | null) => void;
+  playQueue: (tracks: Track[], startIndex?: number) => void;
+  playTrack: (track: Track, context?: Track[]) => void;
+  toggle: () => void;
+  pause: () => void;
+  resume: () => void;
+  next: (auto?: boolean) => void;
+  prev: () => void;
+  seek: (seconds: number) => void;
+  setVolume: (v: number) => void;
+  toggleMute: () => void;
+  toggleShuffle: () => void;
+  cycleRepeat: () => void;
+  addToQueue: (track: Track) => void;
+  playNext: (track: Track) => void;
+  removeFromQueue: (index: number) => void;
+  moveQueue: (from: number, to: number) => void;
+  clearQueue: () => void;
+  saveQueueAsTracks: () => Track[];
+  setExpanded: (v: boolean) => void;
+  setPanelTab: (tab: "now" | "lyrics" | "queue") => void;
+  setSeeking: (v: boolean) => void;
+  setLyrics: (lyrics: string | null) => void;
+}
+
+let audio: HTMLAudioElement | null = null;
+let resolveToken = 0;
+let failureStreak = 0;
+const resolvedCache = new Map<string, ResolvedAudio>();
+
+/** Seconds before track end at which the next track starts loading. */
+const PRELOAD_AHEAD_SEC = 20;
+let preloadEl: HTMLAudioElement | null = null;
+let preloadKey: string | null = null;
+
+/** The identical next-index logic for `next()` and the preloader. */
+function computeNextIndex(state: { queue: Track[]; index: number; shuffle: boolean; repeat: RepeatMode }, auto: boolean): number | null {
+  const { queue, index, shuffle, repeat } = state;
+  if (!queue.length) return null;
+  if (shuffle && queue.length > 1) return (index + 1) % queue.length;
+  const ni = index + 1;
+  if (ni >= queue.length) {
+    if (repeat === "all") return 0;
+    if (auto) return null;
+    return 0;
+  }
+  return ni;
+}
+
+function dropPreload() {
+  preloadKey = null;
+  if (preloadEl) {
+    preloadEl.removeAttribute("src");
+    preloadEl = null;
+  }
+}
+
+/**
+ * Warm the next track ~20s before the current one ends: resolve it into
+ * our cache and let a hidden element pull the audio bytes into the HTTP
+ * cache, so switching tracks starts playback instantly. Works with
+ * shuffle because it reuses the same next-index logic as `next()`.
+ */
+async function maybePreloadNext(): Promise<void> {
+  if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+  const remaining = audio.duration - audio.currentTime;
+  if (remaining > PRELOAD_AHEAD_SEC || remaining <= 0) return;
+
+  const state = usePlayerStore.getState();
+  const nextIndex = computeNextIndex(state, true);
+  if (nextIndex === null) return;
+  const nextTrack = state.queue[nextIndex];
+  if (!nextTrack) return;
+
+  const key = `${state.current?.id ?? ""}::${nextIndex}`;
+  if (preloadKey === key) return;
+  preloadKey = key;
+
+  try {
+    const resolved = await resolveAudio(nextTrack);
+    preloadEl = new Audio();
+    preloadEl.preload = "auto";
+    preloadEl.src = resolved.audioUrl;
+    preloadEl.load();
+  } catch {
+    preloadKey = null; // unresolvable — let the normal skip path handle it
+  }
+}
+
+/** Client-side memo so skipping back never re-hits the API. */
+const inflight = new Map<string, Promise<ResolvedAudio>>();
+
+export async function resolveAudio(track: Track, force = false): Promise<ResolvedAudio> {
+  const cached = resolvedCache.get(track.id);
+  if (cached && !force) return cached;
+
+  const pending = inflight.get(track.id);
+  // A click landing on a track whose resolution is already under way
+  // (prefetch) must reuse that promise, never start a second conversion.
+  if (pending && !force) return pending;
+
+  const promise = fetch("/api/music/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ track, force }),
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `Audio resolution failed (${res.status})`);
+      }
+      const data = (await res.json()) as { audio: ResolvedAudio };
+      resolvedCache.set(track.id, data.audio);
+      return data.audio;
+    })
+    .finally(() => inflight.delete(track.id));
+  inflight.set(track.id, promise);
+  return promise;
+}
+
+const prefetching = new Set<string>();
+
+/**
+ * Warms resolution for the first few tracks of a visible list in the
+ * background, so clicking play usually starts instantly. Errors are
+ * ignored — the real play path surfaces them.
+ */
+export async function prefetchTracks(tracks: Track[], count = 2): Promise<void> {
+  for (const track of tracks.slice(0, count)) {
+    if (resolvedCache.has(track.id) || prefetching.has(track.id)) continue;
+    prefetching.add(track.id);
+    try {
+      await resolveAudio(track);
+    } catch {
+      /* not playable — the play path will show it */
+    } finally {
+      prefetching.delete(track.id);
+    }
+  }
+}
+
+function loadSource(url: string, autoplay: boolean) {
+  if (!audio) return;
+  audio.src = url;
+  audio.load();
+  if (autoplay) {
+    const promise = audio.play();
+    if (promise) {
+      promise.catch(() => {
+        // Autoplay was blocked by the browser — reflect reality.
+        usePlayerStore.setState({ isPlaying: false, status: "paused" });
+      });
+    }
+  }
+}
+
+function updateMediaSession(track: Track, resolved: ResolvedAudio | null) {
+  if (typeof window === "undefined" || !("mediaSession" in navigator)) return;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.title,
+      artist: track.artist,
+      album: track.album ?? "Lenzo Music",
+      artwork: [
+        { src: resolved?.artwork ?? track.artwork, sizes: "512x512", type: "image/jpeg" },
+      ],
+    });
+    navigator.mediaSession.playbackState = "playing";
+  } catch {
+    /* unsupported */
+  }
+}
+
+async function startTrack(track: Track, queue: Track[], index: number) {
+  const token = ++resolveToken;
+  const store = usePlayerStore.getState();
+  dropPreload();
+
+  // The new click owns the player immediately: stop and drop the old
+  // stream so the old song never keeps playing while the new one loads.
+  if (audio) {
+    try {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    } catch {
+      /* element already detached */
+    }
+  }
+
+  usePlayerStore.setState({
+    current: track,
+    queue,
+    index,
+    resolved: null,
+    lyrics: null,
+    error: null,
+    progress: 0,
+    duration: track.duration || 0,
+    status: "resolving",
+    isPlaying: false,
+  });
+
+  try {
+    const resolved = await resolveAudio(track);
+    if (token !== resolveToken) return; // user skipped ahead while resolving
+
+    usePlayerStore.setState({ resolved, lyrics: resolved.lyrics ?? null });
+    if (resolved.duration) usePlayerStore.setState({ duration: resolved.duration });
+
+    loadSource(resolved.audioUrl, true);
+    usePlayerStore.setState({ status: "playing", isPlaying: true });
+
+    updateMediaSession(track, resolved);
+  } catch (err) {
+    if (token !== resolveToken) return;
+    const message = err instanceof Error ? err.message : "This track is unavailable right now.";
+    usePlayerStore.setState({ status: "error", error: message, isPlaying: false });
+
+    // Don't strand the listener on an unresolvable track: auto-skip to the
+    // next queue entry unless failures stack up (max 3 in a row means the
+    // network or every converter is down — stop and surface the error).
+    const state = usePlayerStore.getState();
+    failureStreak += 1;
+    if (failureStreak <= 3 && state.queue.length > 1) {
+      useUi.getState().showToast(`Skipping "${track.title}" — unavailable`, "info");
+      state.next(true);
+    }
+  }
+}
+
+function orderedIndices(count: number, start: number): number[] {
+  const rest = Array.from({ length: count }, (_, i) => i).filter((i) => i !== start);
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rest[i], rest[j]] = [rest[j], rest[i]];
+  }
+  return [start, ...rest];
+}
+
+export const usePlayerStore = create<PlayerState>((set, get) => ({
+  queue: [],
+  index: 0,
+  current: null,
+  resolved: null,
+  status: "idle",
+  isPlaying: false,
+  progress: 0,
+  duration: 0,
+  volume: 0.8,
+  muted: false,
+  shuffle: false,
+  repeat: "off",
+  error: null,
+  lyrics: null,
+  expanded: false,
+  panelTab: "now",
+  seeking: false,
+
+  attachAudio: (el) => {
+    audio = el;
+    if (!el) return;
+    el.volume = get().volume;
+
+    el.addEventListener("timeupdate", () => {
+      if (!usePlayerStore.getState().seeking) {
+        set({ progress: el.currentTime });
+      }
+      if (el.duration && Number.isFinite(el.duration)) {
+        const d = Math.round(el.duration);
+        if (usePlayerStore.getState().duration !== d) set({ duration: d });
+      }
+      void maybePreloadNext();
+    });
+
+    el.addEventListener("waiting", () => set({ status: "resolving" }));
+    el.addEventListener("playing", () => {
+      failureStreak = 0;
+      set({ status: "playing", isPlaying: true, error: null });
+    });
+    el.addEventListener("pause", () => {
+      if (!el.ended) set({ isPlaying: false, status: "paused" });
+    });
+
+    el.addEventListener("ended", () => {
+      const { repeat, shuffle, queue, index } = usePlayerStore.getState();
+      if (repeat === "one") {
+        el.currentTime = 0;
+        el.play().catch(() => undefined);
+        return;
+      }
+      if (!shuffle && index >= queue.length - 1 && repeat === "off") {
+        set({ isPlaying: false, status: "paused", progress: 0 });
+        return;
+      }
+      usePlayerStore.getState().next(true);
+    });
+
+    el.addEventListener("error", () => {
+      const state = usePlayerStore.getState();
+      if (!state.current || !el.src) return;
+      set({
+        error: "The audio source stopped working. Trying the next available source…",
+        status: "error",
+      });
+    });
+  },
+
+  playQueue: (tracks, startIndex = 0) => {
+    if (!tracks.length) return;
+    const ordered = get().shuffle && tracks.length > 1 ? reorder(tracks, startIndex) : tracks;
+    const idx = get().shuffle && tracks.length > 1 ? 0 : startIndex;
+    void startTrack(ordered[idx], ordered, idx);
+  },
+
+  playTrack: (track, context) => {
+    const queue = context && context.length ? context : [track];
+    const index = Math.max(0, queue.findIndex((t) => t.id === track.id));
+    void startTrack(track, queue, index);
+  },
+
+  toggle: () => {
+    const { current, isPlaying, queue } = get();
+    if (!current) {
+      if (queue.length) void startTrack(queue[0], queue, 0);
+      return;
+    }
+    if (isPlaying) get().pause();
+    else get().resume();
+  },
+
+  pause: () => {
+    audio?.pause();
+    set({ isPlaying: false, status: "paused" });
+  },
+
+  resume: () => {
+    const state = get();
+    if (!audio || !state.current) return;
+    if (!audio.src) {
+      // Nothing loaded yet (e.g. after a hard refresh) — resolve and play.
+      void startTrack(state.current, state.queue, state.index);
+      return;
+    }
+    audio.play()
+      .then(() => set({ isPlaying: true, status: "playing", error: null }))
+      .catch(() => set({ isPlaying: false, status: "paused" }));
+  },
+
+  next: (auto = false) => {
+    const { queue } = get();
+    if (!queue.length) return;
+    const nextIndex = computeNextIndex(get(), auto);
+    if (nextIndex === null) {
+      set({ isPlaying: false, status: "paused", progress: 0 });
+      return;
+    }
+    void startTrack(queue[nextIndex], queue, nextIndex);
+  },
+
+  prev: () => {
+    const { queue, index } = get();
+    if (!queue.length) return;
+    if (audio && audio.currentTime > 3) {
+      audio.currentTime = 0;
+      set({ progress: 0 });
+      return;
+    }
+    const prevIndex = index <= 0 ? queue.length - 1 : index - 1;
+    void startTrack(queue[prevIndex], queue, prevIndex);
+  },
+
+  seek: (seconds) => {
+    if (!audio) return;
+    const clamped = Math.max(0, Math.min(seconds, audio.duration || seconds));
+    audio.currentTime = clamped;
+    set({ progress: clamped, seeking: false });
+  },
+
+  setVolume: (v) => {
+    const volume = Math.max(0, Math.min(1, v));
+    if (audio) {
+      audio.volume = volume;
+      audio.muted = volume === 0;
+    }
+    set({ volume, muted: volume === 0 });
+  },
+
+  toggleMute: () => {
+    const muted = !get().muted;
+    if (audio) audio.muted = muted;
+    set({ muted });
+  },
+
+  toggleShuffle: () => set({ shuffle: !get().shuffle }),
+
+  cycleRepeat: () => {
+    const order: RepeatMode[] = ["off", "all", "one"];
+    const current = get().repeat;
+    set({ repeat: order[(order.indexOf(current) + 1) % order.length] });
+  },
+
+  addToQueue: (track) => {
+    const { queue, current } = get();
+    if (!current) {
+      void startTrack(track, [track], 0);
+      return;
+    }
+    set({ queue: [...queue, track] });
+  },
+
+  playNext: (track) => {
+    const { queue, index, current } = get();
+    if (!current) {
+      void startTrack(track, [track], 0);
+      return;
+    }
+    const next = [...queue];
+    next.splice(index + 1, 0, track);
+    set({ queue: next });
+  },
+
+  removeFromQueue: (index) => {
+    const { queue, index: current } = get();
+    if (index === current) return;
+    const next = queue.filter((_, i) => i !== index);
+    set({ queue: next, index: index < current ? current - 1 : current });
+  },
+
+  moveQueue: (from, to) => {
+    const { queue, index: current } = get();
+    if (from === to || from < 0 || to < 0 || from >= queue.length || to >= queue.length) return;
+    const next = [...queue];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    let newCurrent = current;
+    if (current === from) newCurrent = to;
+    else if (from < current && to >= current) newCurrent = current - 1;
+    else if (from > current && to <= current) newCurrent = current + 1;
+    set({ queue: next, index: newCurrent });
+  },
+
+  clearQueue: () => {
+    const { current } = get();
+    set({ queue: current ? [current] : [], index: 0 });
+  },
+
+  saveQueueAsTracks: () => get().queue,
+
+  setExpanded: (expanded) => set({ expanded }),
+  setPanelTab: (panelTab) => set({ panelTab }),
+  setSeeking: (seeking) => set({ seeking }),
+  setLyrics: (lyrics) => set({ lyrics }),
+}));
+
+function reorder(tracks: Track[], startIndex: number): Track[] {
+  const indices = orderedIndices(tracks.length, startIndex);
+  return indices.map((i) => tracks[i]);
+}

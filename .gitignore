@@ -39,3 +39,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# app data + secrets (never push: users, sessions, api config)
+/.data/
+*.db.json
+
+# python backend
+/backend/venv/
+/backend/__pycache__/
+
+# scratch/logs
+dev3100.log
+*.log.local
