@@ -17,11 +17,13 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
    Collection rows carry the item's `id`; a special "settings"
    collection stores admin config keys (id = setting name).
 
-   Consistency model: an in-memory snapshot hydrates from
-   Supabase once per server instance. Every mutation runs on the
-   snapshot and is flushed as a precise diff (upserts + deletes)
-   through a serial queue — cheap at this scale, and safe
-   against concurrent serverless instances (no delete-all).
+   Consistency model: an in-memory snapshot hydrates from Supabase
+   (refreshed on reads when staleness exceeds the window). Every mutation
+   is diffed against the pre-mutation snapshot and flushed as a PRECISE
+   per-mutation diff (only the rows this instance actually created,
+   changed or removed) through a serial queue. Flushing whole snapshots
+   instead caused a stale instance to resurrect rows other instances had
+   deleted (worker-resurrection) — never do that.
    ============================================================ */
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
@@ -39,8 +41,6 @@ let supabase: SupabaseClient | null = null;
 let hydrate: Promise<void> | null = null;
 /** When the current snapshot was pulled from Supabase (0 = never/file). */
 let hydratedAt = 0;
-/** Known remote ids per collection — the baseline for delete diffs. */
-const remoteIds = new Map<string, Set<string>>();
 
 if (SUPABASE_MODE) {
   supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -102,7 +102,6 @@ interface StoreRow {
 async function hydrateFromSupabase(): Promise<void> {
   try {
     const snap: Record<string, unknown> = {};
-    remoteIds.clear();
     let from = 0;
     for (;;) {
       const { data, error } = await supabase!
@@ -120,9 +119,6 @@ async function hydrateFromSupabase(): Promise<void> {
           if (!Array.isArray(snap[row.collection])) snap[row.collection] = [];
           (snap[row.collection] as unknown[]).push(row.data);
         }
-        const ids = remoteIds.get(row.collection) ?? new Set<string>();
-        ids.add(row.id);
-        remoteIds.set(row.collection, ids);
       }
       if (!rows.length || rows.length < 1000) break;
       from += rows.length;
@@ -138,62 +134,97 @@ async function hydrateFromSupabase(): Promise<void> {
   }
 }
 
-function settingsRow(name: string): StoreRow {
-  return { collection: SETTINGS_COLLECTION, id: name, data: getSetting(name, undefined) };
+function stableJson(value: unknown): string {
+  return JSON.stringify(value) ?? "undefined";
 }
 
-function collectionRows(name: string): StoreRow[] {
-  return collection<Record<string, unknown>>(name, []).map((item, i) => ({
-    collection: name,
-    id: typeof item.id === "string" ? item.id : `row_${i}`,
-    data: item,
-  }));
+/** Stable per-item row id: the item's `id`, else its array position. */
+function rowId(item: unknown, index: number): string {
+  const id = (item as { id?: unknown } | null)?.id;
+  return typeof id === "string" && id ? id : `row_${index}`;
 }
 
-function persistToSupabase(): Promise<void> {
-  if (!supabase || !cache) return Promise.resolve();
+function collectionMap(value: unknown): Map<string, unknown> {
+  const map = new Map<string, unknown>();
+  if (Array.isArray(value)) value.forEach((item, i) => map.set(rowId(item, i), item));
+  return map;
+}
 
-  // Upsert every row we now hold; delete remote rows that vanished.
+/**
+ * Diff the pre-mutation snapshot against the post-mutation one. Only rows
+ * this instance actually created/changed (collection + settings) and rows it
+ * actually removed end up in the flush — a stale snapshot alone never writes
+ * anything (that's what resurrected deleted data before).
+ */
+function diffSnapshots(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): { upserts: StoreRow[]; deletes: Array<{ collection: string; id: string }> } {
   const upserts: StoreRow[] = [];
-  const deletes: Array<{ collection: string; ids: string[] }> = [];
-  for (const [key, value] of Object.entries(cache)) {
-    if (Array.isArray(value)) {
-      const rows = collectionRows(key);
-      for (const row of rows) upserts.push(row);
-      const ids = new Set(rows.map((r) => r.id));
-      const stale = [...(remoteIds.get(key) ?? [])].filter((id) => !ids.has(id));
-      if (stale.length) deletes.push({ collection: key, ids: stale });
-      remoteIds.set(key, ids);
-    } else {
-      upserts.push(settingsRow(key));
-      const ids = remoteIds.get(SETTINGS_COLLECTION) ?? new Set<string>();
-      ids.add(key);
-      remoteIds.set(SETTINGS_COLLECTION, ids);
+  const deletes: Array<{ collection: string; id: string }> = [];
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+
+  for (const key of keys) {
+    const b = before[key];
+    const a = after[key];
+
+    if (Array.isArray(b) || Array.isArray(a)) {
+      const bm = collectionMap(b);
+      const am = collectionMap(a);
+      for (const [id, item] of am) {
+        if (!bm.has(id) || stableJson(bm.get(id)) !== stableJson(item)) {
+          upserts.push({ collection: key, id, data: item });
+        }
+      }
+      if (Array.isArray(b)) {
+        for (const id of bm.keys()) {
+          if (!am.has(id)) deletes.push({ collection: key, id });
+        }
+      }
+      if (Array.isArray(b) && !Array.isArray(a)) {
+        // collection became a scalar setting — remove every old row
+        for (const id of bm.keys()) deletes.push({ collection: key, id });
+      }
+    } else if (stableJson(b) !== stableJson(a)) {
+      if (a !== undefined) {
+        upserts.push({ collection: SETTINGS_COLLECTION, id: key, data: a });
+      } else if (b !== undefined) {
+        deletes.push({ collection: SETTINGS_COLLECTION, id: key });
+      }
     }
   }
+  return { upserts, deletes };
+}
 
-  const work = (async () => {
-    try {
-      const pageSize = 500;
-      for (let i = 0; i < upserts.length; i += pageSize) {
-        const { error } = await supabase!
-          .from("store")
-          .upsert(upserts.slice(i, i + pageSize), { onConflict: "collection,id" });
-        if (error) throw new Error(error.message);
-      }
-      for (const del of deletes) {
-        const { error } = await supabase!
-          .from("store")
-          .delete()
-          .eq("collection", del.collection)
-          .in("id", del.ids);
-        if (error) throw new Error(error.message);
-      }
-    } catch (err) {
-      console.error("[db] supabase persist failed:", err instanceof Error ? err.message : err);
+async function persistToSupabase(
+  upserts: StoreRow[],
+  deletes: Array<{ collection: string; id: string }>,
+): Promise<void> {
+  try {
+    const pageSize = 500;
+    for (let i = 0; i < upserts.length; i += pageSize) {
+      const { error } = await supabase!
+        .from("store")
+        .upsert(upserts.slice(i, i + pageSize), { onConflict: "collection,id" });
+      if (error) throw new Error(error.message);
     }
-  })();
-  return work;
+    const byCollection = new Map<string, string[]>();
+    for (const del of deletes) {
+      const ids = byCollection.get(del.collection) ?? [];
+      ids.push(del.id);
+      byCollection.set(del.collection, ids);
+    }
+    for (const [collection, ids] of byCollection) {
+      const { error } = await supabase!
+        .from("store")
+        .delete()
+        .eq("collection", collection)
+        .in("id", ids);
+      if (error) throw new Error(error.message);
+    }
+  } catch (err) {
+    console.error("[db] supabase persist failed:", err instanceof Error ? err.message : err);
+  }
 }
 
 /* ---------- File driver (dev / fallback) ---------- */
@@ -232,17 +263,20 @@ export function readDb<T = Record<string, unknown>>(): T {
   return (cache ?? {}) as T;
 }
 
-function persist() {
-  if (supabase) writeQueue = writeQueue.then(() => persistToSupabase());
-  else writeQueue = writeQueue.then(() => persistFile());
-  return writeQueue;
-}
-
-/** Mutate the store; the change is flushed (Supabase or disk) asynchronously. */
+/** Mutate the store; ONLY the precise change is flushed (Supabase or disk). */
 export function updateDb<T = Record<string, unknown>>(mutator: (db: Record<string, unknown>) => T): T {
   const db = readDb();
+  if (supabase && cache) {
+    const before = structuredClone(cache);
+    const result = mutator(db);
+    const { upserts, deletes } = diffSnapshots(before, cache);
+    if (upserts.length || deletes.length) {
+      writeQueue = writeQueue.then(() => persistToSupabase(upserts, deletes));
+    }
+    return result;
+  }
   const result = mutator(db);
-  void persist();
+  if (!supabase) writeQueue = writeQueue.then(() => persistFile());
   return result;
 }
 
@@ -271,7 +305,6 @@ export function flushWrites(): Promise<void> {
 /** Test/ops helper — wipes all persisted application data. */
 export function resetDb(): void {
   cache = {};
-  remoteIds.clear();
   if (supabase) {
     writeQueue = writeQueue.then(async () => {
       try {
@@ -280,7 +313,5 @@ export function resetDb(): void {
         console.error("[db] supabase reset failed", err);
       }
     });
-  } else {
-    void persist();
   }
 }
