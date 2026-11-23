@@ -8,9 +8,12 @@ import ImportSpotifyButton from "@/components/library/ImportSpotify";
 import { EmptyState } from "@/components/ui/skeletons";
 import { useSession } from "@/lib/store/session";
 import { useApi } from "@/lib/client/hooks";
+import type { Playlist } from "@/types";
 
 /* ============================================================
    LIBRARY — everything a listener owns or follows, filterable.
+   Playlists load via /api/playlists (server, synced across
+   devices); liked/albums/downloads come from the session store.
    ============================================================ */
 
 export default function LibraryPage() {
@@ -18,6 +21,9 @@ export default function LibraryPage() {
   const [filter, setFilter] = useState<LibraryFilter>("all");
   const [grid, setGrid] = useState(true);
   const [query, setQuery] = useState("");
+
+  const playlistsApi = useApi<{ mine: Playlist[] }>("/api/playlists");
+  const playlists = playlistsApi.data?.mine ?? [];
 
   const available: LibraryFilter[] = ["all", "playlists", "artists", "albums", "downloads"];
 
@@ -29,7 +35,7 @@ export default function LibraryPage() {
           <p className="mt-1 text-sm text-muted">{session.user ? `${session.user.username}'s collection` : "Sign in to build your collection"}</p>
         </div>
         <div className="flex items-center gap-2">
-          {session.user && <ImportSpotifyButton />}
+          {session.user && <ImportSpotifyButton onImported={playlistsApi.reload} />}
           <ViewToggle grid={grid} onToggle={() => setGrid((g) => !g)} />
         </div>
       </header>
@@ -48,7 +54,13 @@ export default function LibraryPage() {
 
       <QuickLinks />
 
-      <LibraryContent filter={filter} grid={grid} query={query} signedIn={Boolean(session.user)} />
+      <LibraryContent
+        filter={filter}
+        grid={grid}
+        query={query}
+        signedIn={Boolean(session.user)}
+        playlists={playlists}
+      />
     </div>
   );
 }
@@ -74,32 +86,72 @@ function QuickLinks() {
   );
 }
 
-function LibraryContent({ filter, grid, query, signedIn }: { filter: LibraryFilter; grid: boolean; query: string; signedIn: boolean }) {
+function LibraryContent({
+  filter,
+  grid,
+  query,
+  signedIn,
+  playlists,
+}: {
+  filter: LibraryFilter;
+  grid: boolean;
+  query: string;
+  signedIn: boolean;
+  playlists: Playlist[];
+}) {
   const session = useSession();
-  void query;
 
   if (!signedIn) return null;
 
-  const artists = session.library.followedArtists;
-  const albums = session.library.savedAlbums;
-  const downloads = session.library.downloads;
+  const needle = query.trim().toLowerCase();
+  const match = (title: string | undefined) => Boolean(!needle || title?.toLowerCase().includes(needle));
+
+  const playlistsFiltered = playlists.filter((pl) => match(pl.name));
+  const artists = session.library.followedArtists.filter((a) => match(a.name));
+  const albums = session.library.savedAlbums.filter((a) => match(a.title));
+  const downloads = session.library.downloads.filter((t) => match(t.title) || match(t.artist));
 
   const show = (f: LibraryFilter) => filter === "all" || filter === f;
-  const empty = (!show("artists") || artists.length === 0) && (!show("albums") || albums.length === 0) && (!show("downloads") || downloads.length === 0);
 
-  if (empty) {
+  // Emptiness considers EVERY source — playlists included (before, users
+  // with only imported playlists got the "nothing saved yet" state and
+  // never saw them here).
+  const nothingAtAll = playlists.length === 0 && session.library.followedArtists.length === 0 && session.library.savedAlbums.length === 0 && session.library.downloads.length === 0;
+  const nothingMatching =
+    playlistsFiltered.length === 0 &&
+    artists.length === 0 &&
+    albums.length === 0 &&
+    downloads.length === 0;
+
+  if (nothingAtAll) {
     return (
       <EmptyState
         title="Nothing saved yet"
-        description="Like songs, follow artists and save albums — they will all show up here."
-        action={<Link href="/discover" className="rounded-pill bg-electric px-5 py-2.5 text-xs font-bold text-white hover:bg-cyan">Start discovering</Link>}
+        description="Import a Spotify playlist, like songs, follow artists and save albums — they will all show up here."
+        action={<ImportSpotifyButton />}
       />
     );
+  }
+  if (nothingMatching) {
+    return <EmptyState title="No matches" description={`Nothing in your library matches "${query}".`} />;
   }
 
   return (
     <div className="flex flex-col gap-6">
-      {show("playlists") && <PlaylistsSection />}
+      {show("playlists") && playlistsFiltered.length > 0 && (
+        <section>
+          <h2 className="mb-2 px-1 text-sm font-bold uppercase tracking-[0.12em] text-faint">Your playlists</h2>
+          <div className="grid grid-cols-3 gap-3 md:grid-cols-5 lg:grid-cols-6">
+            {playlistsFiltered.map((pl) => (
+              <Link key={pl.id} href={`/playlists/${pl.id}`} className="group">
+                <img src={pl.artwork} alt="" loading="lazy" className="aspect-square w-full rounded-card object-cover shadow-lg shadow-black/30 transition-transform group-hover:scale-[1.03]" />
+                <p className="mt-2 truncate text-sm font-semibold text-ink">{pl.name}</p>
+                <p className="truncate text-xs text-muted">{pl.tracks.length} songs</p>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
       {show("artists") && artists.length > 0 && (
         <section>
           <h2 className="mb-2 px-1 text-sm font-bold uppercase tracking-[0.12em] text-faint">Followed artists</h2>
@@ -115,28 +167,12 @@ function LibraryContent({ filter, grid, query, signedIn }: { filter: LibraryFilt
       {show("downloads") && downloads.length > 0 && (
         <section>
           <h2 className="mb-2 px-1 text-sm font-bold uppercase tracking-[0.12em] text-faint">Downloads</h2>
-          <AlbumGridOrList albums={downloads.map((t) => ({ id: t.albumId ?? t.id, title: t.title, artist: t.artist, artwork: t.artwork, type: t.albumType }))} grid={grid} />
+          <AlbumGridOrList
+            albums={downloads.map((t) => ({ id: t.albumId ?? t.id, title: t.title, artist: t.artist, artwork: t.artwork, type: t.albumType }))}
+            grid={grid}
+          />
         </section>
       )}
     </div>
-  );
-}
-
-function PlaylistsSection() {
-  const data = useApi<{ mine: import("@/types").Playlist[] }>("/api/playlists");
-  if (!data.data?.mine.length) return null;
-  return (
-    <section>
-      <h2 className="mb-2 px-1 text-sm font-bold uppercase tracking-[0.12em] text-faint">Your playlists</h2>
-      <div className="grid grid-cols-3 gap-3 md:grid-cols-5 lg:grid-cols-6">
-        {data.data.mine.map((pl) => (
-          <Link key={pl.id} href={`/playlists/${pl.id}`} className="group">
-            <img src={pl.artwork} alt="" loading="lazy" className="aspect-square w-full rounded-card object-cover shadow-lg shadow-black/30 transition-transform group-hover:scale-[1.03]" />
-            <p className="mt-2 truncate text-sm font-semibold text-ink">{pl.name}</p>
-            <p className="truncate text-xs text-muted">{pl.tracks.length} songs</p>
-          </Link>
-        ))}
-      </div>
-    </section>
   );
 }

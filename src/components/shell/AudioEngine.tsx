@@ -7,9 +7,10 @@ import { useSession } from "@/lib/store/session";
 /* ============================================================
    AUDIO ENGINE
    The single <audio> element for the whole application. Mounted
-   once by the shell and attached to the player store; also wires
-   Media Session controls, keyboard shortcuts and recent-history
-   tracking. Renders nothing.
+   once by the shell and attached to the player store (which owns
+   the Media Session actions); also wires background-resume
+   resync, keyboard shortcuts and recent-history tracking.
+   Renders nothing.
    ============================================================ */
 
 export default function AudioEngine() {
@@ -19,6 +20,14 @@ export default function AudioEngine() {
     // NOTE: crossOrigin must stay unset. The converter hosts (spotidown,
     // ytmp3 CDNs) don't send CORS headers, so an anonymous crossOrigin
     // request makes the browser block every track outright.
+    audio.setAttribute("playsinline", "");
+    // CRITICAL for background playback: the element MUST live in the DOM.
+    // A detached <audio> gets its media session dropped and its playback
+    // suspended by mobile browsers while the page is backgrounded — the
+    // control-center play button then silently does nothing until the app
+    // is foregrounded again.
+    audio.style.display = "none";
+    document.body.appendChild(audio);
     usePlayerStore.getState().attachAudio(audio);
 
     const onPlay = () => {
@@ -27,32 +36,17 @@ export default function AudioEngine() {
     };
     audio.addEventListener("play", onPlay);
 
-    return () => {
-      audio.pause();
-      audio.removeEventListener("play", onPlay);
-      usePlayerStore.getState().attachAudio(null);
-    };
-  }, []);
-
-  useEffect(() => {
-    const player = () => usePlayerStore.getState();
-
-    if ("mediaSession" in navigator) {
-      try {
-        navigator.mediaSession.setActionHandler("play", () => player().resume());
-        navigator.mediaSession.setActionHandler("pause", () => player().pause());
-        navigator.mediaSession.setActionHandler("nexttrack", () => player().next());
-        navigator.mediaSession.setActionHandler("previoustrack", () => player().prev());
-        navigator.mediaSession.setActionHandler("seekbackward", (details) =>
-          player().seek(player().progress - (details.seekOffset ?? 10))
-        );
-        navigator.mediaSession.setActionHandler("seekforward", (details) =>
-          player().seek(player().progress + (details.seekOffset ?? 10))
-        );
-      } catch {
-        /* partial browser support */
+    // When the page becomes visible again, resync the UI/OS with what the
+    // audio element actually did in the background — and restart playback
+    // if the browser paused the element under us while hidden.
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      const p = usePlayerStore.getState();
+      if (p.isPlaying && audio.paused && !audio.ended) {
+        audio.play().catch(() => undefined);
       }
-    }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -60,7 +54,7 @@ export default function AudioEngine() {
       if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
       if (target?.isContentEditable) return;
 
-      const p = player();
+      const p = usePlayerStore.getState();
       switch (e.key) {
         case " ":
           e.preventDefault();
@@ -97,8 +91,14 @@ export default function AudioEngine() {
       }
     };
     window.addEventListener("keydown", onKey);
+
     return () => {
+      audio.pause();
+      audio.removeEventListener("play", onPlay);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("keydown", onKey);
+      audio.remove();
+      usePlayerStore.getState().attachAudio(null);
     };
   }, []);
 

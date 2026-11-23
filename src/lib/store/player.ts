@@ -270,7 +270,7 @@ function updateMediaSession(track: Track, resolved: ResolvedAudio | null) {
   }
 }
 
-async function startTrack(track: Track, queue: Track[], index: number) {
+async function startTrack(track: Track, queue: Track[], index: number, resumeAt = 0) {
   const token = ++resolveToken;
   const store = usePlayerStore.getState();
   dropPreload();
@@ -308,6 +308,17 @@ async function startTrack(track: Track, queue: Track[], index: number) {
     if (resolved.duration) usePlayerStore.setState({ duration: resolved.duration });
 
     loadSource(audioSourceFor(resolved, track.id), true);
+    // Restoring a pause position (control-center resume after the URL
+    // expired): jump back once the new source can seek.
+    if (resumeAt > 0 && audio) {
+      const restore = () => {
+        try {
+          audio!.currentTime = resumeAt;
+        } catch { /* metadata not ready yet */ }
+      };
+      if (audio.readyState >= 1) restore();
+      else audio.addEventListener("loadedmetadata", restore, { once: true });
+    }
     usePlayerStore.setState({ status: "playing", isPlaying: true });
 
     updateMediaSession(track, resolved);
@@ -421,9 +432,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
           const still = usePlayerStore.getState();
           if (still.isPlaying) {
             await el.play().catch(() => set({ isPlaying: false, status: "paused" }));
+            set({ resolved, status: "playing", error: null });
+            setMediaPlaybackState("playing");
+          } else {
+            set({ resolved, status: "paused", error: null });
           }
-          set({ resolved, status: "playing", error: null });
-          setMediaPlaybackState("playing");
         } catch {
           set({
             error: "The audio source stopped working. Trying the next available source…",
@@ -487,9 +500,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       void startTrack(state.current, state.queue, state.index);
       return;
     }
+    const position = audio.currentTime || 0;
+    const { current: track, queue, index } = state;
     audio.play()
       .then(() => set({ isPlaying: true, status: "playing", error: null }))
-      .catch(() => set({ isPlaying: false, status: "paused" }));
+      .catch(() => {
+        // The signed CDN URL expired while the app was in the background.
+        // Some mobile browsers report this as a play() rejection without an
+        // element error event — recover by fully re-resolving the SAME track
+        // at the same position instead of silently staying paused.
+        void startTrack(track, queue, index, position);
+      });
   },
 
   next: (auto = false) => {
