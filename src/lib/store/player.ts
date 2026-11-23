@@ -224,17 +224,18 @@ function setMediaPlaybackState(state: "playing" | "paused") {
 }
 
 /**
- * Wire the OS control-center actions once. Without these handlers the
- * lockscreen/control-center play button silently fails (the OS clicks the
- * audio element directly — which cannot recover an expired signed CDN URL)
- * and next/prev do nothing at all.
+ * Wire the OS control-center actions once. Next/prev/seek NEED JavaScript,
+ * so they are registered here. Play/pause are deliberately NOT registered:
+ * without a handler, iOS/Android resume the audio element NATIVELY — that
+ * works even when a standalone PWA's JS is frozen in the background, and
+ * avoids the user-activation problems of lock-screen taps. Our element
+ * play/pause/playing listeners keep the store and mediaSession state in
+ * sync either way.
  */
 function installMediaSessionHandlers() {
   if (typeof window === "undefined" || !("mediaSession" in navigator)) return;
   const st = () => usePlayerStore.getState();
   const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
-    ["play", () => st().resume()],
-    ["pause", () => st().pause()],
     ["previoustrack", () => st().prev()],
     ["nexttrack", () => st().next()],
     ["seekto", (details) => {
@@ -251,6 +252,12 @@ function installMediaSessionHandlers() {
       /* action unsupported on this platform */
     }
   }
+  // Explicitly CLEAR play/pause so a previously installed handler (e.g.
+  // from an older app version still cached) never shadows native control.
+  try {
+    navigator.mediaSession.setActionHandler("play", null);
+    navigator.mediaSession.setActionHandler("pause", null);
+  } catch { /* unsupported */ }
 }
 
 function updateMediaSession(track: Track, resolved: ResolvedAudio | null) {

@@ -356,7 +356,13 @@ function Expanded({
               <h3 className="text-base font-extrabold text-ink">Lyrics</h3>
               <button
                 type="button"
-                onClick={() => router.push("/lyrics")}
+                onClick={() => {
+                  // Collapse this overlay FIRST — while expanded it covers
+                  // whatever route we navigate to, which is why the lyrics
+                  // page appeared to never open.
+                  usePlayerStore.getState().setExpanded(false);
+                  router.push("/lyrics");
+                }}
                 className="flex items-center gap-1 rounded-full px-3 py-1 text-[11px] font-bold text-muted hover:bg-white/8 hover:text-ink"
               >
                 Show lyrics

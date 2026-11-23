@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SearchIcon, Play, X } from "lucide-react";
@@ -17,9 +17,33 @@ import type { SearchResults, Track } from "@/types";
    ============================================================ */
 
 const RECENT_KEY = "lenzo.search.recent";
+const SCROLL_KEY = "lenzo.search.scroll";
 // Remembers the query across navigations so coming back (from an album,
 // artist or the dock's Search tab) restores the search instead of wiping it.
 const LASTQ_KEY = "lenzo.search.last";
+// Remembers the last RESULTS + scroll position so returning lands exactly
+// where the user left the list (e.g. after opening an album from search).
+const RESULTS_KEY = "lenzo.search.results";
+const RESULTS_TTL_MS = 10 * 60_000;
+
+interface CachedResults {
+  q: string;
+  data: { results: SearchResults };
+  scroll: number;
+  at: number;
+}
+
+function readResultsCache(): CachedResults | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(RESULTS_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as CachedResults;
+    return Date.now() - cached.at < RESULTS_TTL_MS ? cached : null;
+  } catch {
+    return null;
+  }
+}
 // All sources (SoundCloud + Spotify + YouTube) are merged into one unified
 // catalogue — the UI never splits results by provider.
 
@@ -43,6 +67,7 @@ function SearchInner() {
   const [lastQuery, setLastQuery] = useState("");
   const [recent, setRecent] = useState<string[]>([]);
   const [focused, setFocused] = useState(false);
+  const [cached, setCached] = useState<CachedResults | null>(null);
   const query = typed !== null ? typed : urlQuery || lastQuery;
   const debounced = useDebounced(query.trim(), 200);
 
@@ -50,6 +75,7 @@ function SearchInner() {
     try {
       setRecent(JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]"));
       setLastQuery(sessionStorage.getItem(LASTQ_KEY) ?? "");
+      setCached(readResultsCache());
     } catch {
       setRecent([]);
     }
@@ -82,6 +108,55 @@ function SearchInner() {
   const results = useApi<{ results: SearchResults }>(
     debounced.length >= 2 ? `/api/music/search?q=${encodeURIComponent(debounced)}&limit=50` : null
   );
+
+  // Fresh results replace the cache; cache is used while refetching.
+  useEffect(() => {
+    const data = results.data;
+    if (!data) return;
+    try {
+      sessionStorage.setItem(RESULTS_KEY, JSON.stringify({ q: debounced, data, at: Date.now() }));
+    } catch { /* private mode */ }
+  }, [results.data, debounced]);
+
+  // Track how deep the user scrolled into the results (the app scrolls the
+  // <main> container, not the window) — small separate key so scrolling
+  // never re-serialises the whole result payload.
+  useEffect(() => {
+    const main = document.querySelector("main");
+    if (!main) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        try {
+          sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ q: query.trim(), scroll: main.scrollTop }));
+        } catch { /* private mode */ }
+      }, 250);
+    };
+    main.addEventListener("scroll", onScroll, { passive: true });
+    return () => main.removeEventListener("scroll", onScroll);
+  }, [query]);
+
+  // Returning to a cached view (back-nav, dock re-entry): snap back to the
+  // scroll position the user left the list at — once, after content paints.
+  const restoredFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (results.loading && !results.data && cached?.q === debounced && restoredFor.current !== debounced) {
+      restoredFor.current = debounced;
+      requestAnimationFrame(() => {
+        let scroll = 0;
+        try {
+          const raw = sessionStorage.getItem(SCROLL_KEY);
+          const entry = raw ? (JSON.parse(raw) as { q: string; scroll: number }) : null;
+          if (entry?.q === cached.q) scroll = entry.scroll;
+        } catch { /* private mode */ }
+        document.querySelector("main")?.scrollTo({ top: scroll });
+      });
+    }
+  }, [results.loading, results.data, cached, debounced]);
+
+  // Show cached results instantly when refetching the same query.
+  const view = results.data ?? (cached?.q === debounced ? cached.data : null);
 
   const commit = (q: string) => {
     setTyped(q);
@@ -141,7 +216,12 @@ function SearchInner() {
                 onClick={() => {
                   setTyped("");
                   setLastQuery("");
-                  try { sessionStorage.removeItem(LASTQ_KEY); } catch { /* private mode */ }
+                  setCached(null);
+                  try {
+                    sessionStorage.removeItem(LASTQ_KEY);
+                    sessionStorage.removeItem(RESULTS_KEY);
+                    sessionStorage.removeItem(SCROLL_KEY);
+                  } catch { /* private mode */ }
                   router.replace("/search", { scroll: false });
                 }}
                 className="grid size-6 place-items-center rounded-full bg-white/8 text-muted hover:text-ink"
@@ -170,13 +250,12 @@ function SearchInner() {
         />
       )}
 
-      {/* Results */}
-      {(searching || results.data) && (
+      {/* Results — cached ones render instantly while a fresh fetch runs. */}
+      {(view || results.error) && (
         <>
-          {searching && (results.data ? <TrackListSkeleton count={5} /> : <TrackListSkeleton count={10} />)}
           {results.error && <ErrorState message={`${results.error} — try another source.`} onRetry={results.reload} />}
 
-          {results.data?.results && <SearchResultsView results={results.data.results} query={debounced} tracks={results.data.results.tracks} />}
+          {view?.results && <SearchResultsView results={view.results} query={debounced} tracks={view.results.tracks} />}
         </>
       )}
     </div>
