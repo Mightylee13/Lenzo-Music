@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { fetchLyrics } from "@/lib/api/music";
 
+export const maxDuration = 60;
+
 /**
  * GET /api/music/lyrics?title=&artist=&duration= — on-demand lyrics lookup
  * for the current track. Primary source is LRCLIB (returns synced LRC when

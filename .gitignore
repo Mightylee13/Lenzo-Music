@@ -51,3 +51,5 @@ next-env.d.ts
 # scratch/logs
 dev3100.log
 *.log.local
+
+.vercel

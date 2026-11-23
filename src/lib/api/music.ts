@@ -1,4 +1,5 @@
 import "server-only";
+import { revalidateTag, unstable_cache } from "next/cache";
 import { ApiError, callUpstream } from "@/lib/api/client";
 import { backupResolve, backupSearchTracks } from "@/lib/api/backup";
 import { decorateWithItunesReleases } from "@/lib/api/itunes";
@@ -41,7 +42,15 @@ function cached<T>(key: string, ttlMs: number, producer: () => Promise<T>): Prom
   // (e.g. a fan-out section and a user search for the same query).
   const existing = inflight.get(key);
   if (existing) return existing as Promise<T>;
-  const promise = producer()
+  // L2: Next's Data Cache. The in-memory map above dies with each
+  // serverless invocation (on Vercel every request can be a cold lambda),
+  // which made the deployed app re-fetch every search and re-convert every
+  // song from scratch. The Data Cache survives across invocations and
+  // regions, so repeat searches/requests come back in milliseconds.
+  const revalidate = Math.max(1, Math.round(ttlMs / 1000));
+  const produce = unstable_cache(producer, [key, "music-v2"], { revalidate, tags: ["music"] });
+  const promise = Promise.resolve()
+    .then(() => produce() as Promise<T>)
     .then((value) => {
       store.set(key, { value, expires: Date.now() + ttlMs });
       inflight.delete(key);
@@ -315,7 +324,12 @@ export async function searchAll(query: string): Promise<SearchResults> {
     const expansion = [...candidates.values()]
       .sort((a, b) => b.popularity - a.popularity || a.name.length - b.name.length)[0];
 
-    if (expansion) {
+    // When the direct hits already match the query well (a real title/artist
+    // match), the extra expansion round-trips only add latency for results
+    // nobody needed. They exist for partial queries like "davi" → "Davido".
+    const strongHit = scored.some((s) => s.score >= 90);
+
+    if (expansion && !strongHit) {
       try {
         const extra = await Promise.allSettled([
           searchTracks(expansion.name, "soundcloud"),
@@ -845,4 +859,12 @@ export async function testConnection(): Promise<ApiStatus> {
 
 export function clearMusicCache(): void {
   store.clear();
+  inflight.clear();
+  // Expire the persistent (Vercel Data Cache) layer too — expire: 0 means
+  // the next read is a blocking revalidate, never stale audio.
+  try {
+    revalidateTag("music", { expire: 0 });
+  } catch {
+    /* outside a request scope (e.g. build) — nothing to revalidate */
+  }
 }

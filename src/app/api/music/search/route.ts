@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { searchAll, searchTracks } from "@/lib/api/music";
 import type { SearchSource } from "@/types";
 
+// The all-source fan-out can queue up to 5 upstream calls behind each other
+// (they serialise per API key); too-slow search here was a top complaint.
+export const maxDuration = 60;
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const q = url.searchParams.get("q")?.trim() ?? "";

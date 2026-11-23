@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 
+// The stream proxies a full song through this function for as long as the
+// browser keeps downloading it; the default timeout would cut audio mid-
+// play on slower connections.
+export const maxDuration = 60;
+
 /* ============================================================
    AUDIO STREAM PROXY
    Some converter CDNs (e.g. the ytmp3 host) serve MP3s WITHOUT
