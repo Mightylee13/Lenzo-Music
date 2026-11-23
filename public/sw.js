@@ -1,39 +1,44 @@
 /* ============================================================
-   LENZO MUSIC — DEVICE AUDIO CACHE (service worker)
-   ------------------------------------------------------------
-   Once a song has played, its audio bytes are stored on the
-   device (Cache Storage), so replaying it starts instantly —
-   zero network — and still works offline (within the cap).
+   LENZO MUSIC SERVICE WORKER
+   Two independent caches:
 
-   Strategy per /api/music/stream?...&tid=<trackId> request:
-     1. Serve from cache when present (range requests are
-        sliced from the stored full response).
-     2. On a miss, pass the live response through AND fetch the
-        full file once in the background to store it.
+   1) DEVICE AUDIO CACHE (audio-cache-v1)
+      Once a song has played, its audio bytes are stored on the
+      device keyed by stable track id (the resolved CDN links are
+      signed and expiring). Replays start instantly — zero network
+      — and still work offline (within the cap). Range requests
+      are sliced from the stored full response.
 
-   Keyed by stable track id, because the resolved CDN links are
-   signed and expiring — the cache must outlive each link.
+   2) OFFLINE NAVIGATION CACHE (lenzo-nav-v1)
+      Navigations + Next RSC payloads + immutable /_next/static
+      assets are network-first with cache fallback, so routes you
+      visited while online still open offline.
+      API reads are NOT cached here — the page layer (localStorage
+      useApi cache) handles its own offline repaint.
 
-   Storage cap: FIFO eviction at MAX_ENTRIES (~250 songs ≈ 1 GB
-   at 128 kbps), the same budget a music app asks the browser
-   for on install.
    ============================================================ */
 
-const CACHE_NAME = "audio-cache-v1";
-const KEY_PREFIX = "/__audio__/";
-const MAX_ENTRIES = 250;
+const AUDIO_CACHE = "audio-cache-v1";
+const AUDIO_KEY_PREFIX = "/__audio__/";
+const AUDIO_MAX_ENTRIES = 250;
+
+const NAV_CACHE = "lenzo-nav-v1";
+const NAV_MAX_ENTRIES = 300;
 
 self.addEventListener("install", () => self.skipWaiting());
+
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       for (const name of await caches.keys()) {
-        if (name !== CACHE_NAME) await caches.delete(name);
+        if (name !== AUDIO_CACHE && name !== NAV_CACHE) await caches.delete(name);
       }
       await self.clients.claim();
     })()
   );
 });
+
+/* ---------------- helpers: audio cache ---------------- */
 
 function isStreamRequest(url) {
   return (
@@ -42,15 +47,15 @@ function isStreamRequest(url) {
   );
 }
 
-function cacheKey(url) {
+function audioKey(url) {
   const tid = new URLSearchParams(url.search).get("tid");
-  return new URL(KEY_PREFIX + encodeURIComponent(tid), self.location.origin).toString();
+  return new URL(AUDIO_KEY_PREFIX + encodeURIComponent(tid), self.location.origin).toString();
 }
 
-async function evictIfNeeded() {
-  const cache = await caches.open(CACHE_NAME);
+async function evictAudioIfNeeded() {
+  const cache = await caches.open(AUDIO_CACHE);
   const keys = await cache.keys();
-  let extra = keys.length - MAX_ENTRIES;
+  let extra = keys.length - AUDIO_MAX_ENTRIES;
   for (const key of keys) {
     if (extra <= 0) break;
     await cache.delete(key);
@@ -84,29 +89,96 @@ async function sliceCached(cache, key, request) {
   });
 }
 
+/* ---------------- helpers: navigation cache ---------------- */
+
+async function trimCache(name, max) {
+  try {
+    const cache = await caches.open(name);
+    const keys = await cache.keys();
+    const excess = keys.length - max;
+    for (let i = 0; i < excess; i++) await cache.delete(keys[i]);
+  } catch {
+    /* best-effort */
+  }
+}
+
+async function networkFirst(req, isNavigation) {
+  const cache = await caches.open(NAV_CACHE);
+  try {
+    const res = await fetch(req);
+    if (res && res.ok && res.type === "basic") {
+      void cache.put(req, res.clone()).then(() => trimCache(NAV_CACHE, NAV_MAX_ENTRIES));
+    }
+    return res;
+  } catch (err) {
+    const cached = await cache.match(req);
+    if (cached) return cached;
+    if (isNavigation) {
+      // Unknown route offline: serve the cached app shell — the client
+      // router renders the page from it.
+      const shell = await cache.match("/");
+      if (shell) return shell;
+    }
+    throw err;
+  }
+}
+
+async function cacheFirst(req) {
+  const cache = await caches.open(NAV_CACHE);
+  const cached = await cache.match(req);
+  if (cached) return cached;
+  const res = await fetch(req);
+  if (res && res.ok) {
+    void cache.put(req, res.clone()).then(() => trimCache(NAV_CACHE, NAV_MAX_ENTRIES));
+  }
+  return res;
+}
+
+/* ---------------- fetch routing ---------------- */
+
 self.addEventListener("fetch", (event) => {
-  const url = new URL(event.request.url);
-  if (event.request.method !== "GET" || !isStreamRequest(url)) return;
+  const req = event.request;
+  if (req.method !== "GET") return;
 
-  event.respondWith(
-    (async () => {
-      const cache = await caches.open(CACHE_NAME);
-      const key = cacheKey(url);
-      const cached = await sliceCached(cache, key, event.request);
-      if (cached) return cached;
+  const url = new URL(req.url);
 
-      // Live pass-through for the player, plus a background store
-      // of the full file (the player's request may be ranged).
-      const storeFull = fetch(url.toString(), { cache: "no-store" })
-        .then(async (full) => {
-          if (!full.ok) return;
-          await cache.put(key, full.clone());
-          await evictIfNeeded();
-        })
-        .catch(() => {});
+  // 1) Audio streams: device audio cache (network pass-through + store).
+  if (isStreamRequest(url)) {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(AUDIO_CACHE);
+        const key = audioKey(url);
+        const cached = await sliceCached(cache, key, req);
+        if (cached) return cached;
 
-      const live = fetch(event.request).catch(() => fetch(url.toString()));
-      return Promise.all([live, storeFull]).then(([res]) => res);
-    })()
-  );
+        // Live pass-through for the player, plus a background store
+        // of the full file (the player's request may be ranged).
+        const storeFull = fetch(url.toString(), { cache: "no-store" })
+          .then(async (full) => {
+            if (!full.ok) return;
+            await cache.put(key, full.clone());
+            await evictAudioIfNeeded();
+          })
+          .catch(() => {});
+
+        const live = fetch(req).catch(() => fetch(url.toString()));
+        return Promise.all([live, storeFull]).then(([res]) => res);
+      })()
+    );
+    return;
+  }
+
+  // 2) Same-origin navigation/static caching (offline route access).
+  if (url.origin !== self.location.origin) return;
+
+  if (url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/_next/image")) {
+    event.respondWith(cacheFirst(req));
+    return;
+  }
+
+  const isNavigation = req.mode === "navigate";
+  const isRsc = url.searchParams.has("_rsc") || req.headers.get("RSC") === "1";
+  if (isNavigation || isRsc) {
+    event.respondWith(networkFirst(req, isNavigation));
+  }
 });

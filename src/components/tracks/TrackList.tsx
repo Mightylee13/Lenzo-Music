@@ -9,6 +9,7 @@ import { usePlayerStore, prefetchTracks } from "@/lib/store/player";
 import { useSession } from "@/lib/store/session";
 import { useUi } from "@/lib/store/ui";
 import { formatDuration } from "@/lib/client/fetcher";
+import { useOnline } from "@/lib/client/hooks";
 import type { Track } from "@/types";
 
 /* ============================================================
@@ -56,8 +57,51 @@ export default function TrackList({
   const current = usePlayerStore((s) => s.current);
   const playTrack = usePlayerStore((s) => s.playTrack);
   const toggle = usePlayerStore((s) => s.toggle);
+  const unplayable = usePlayerStore((s) => s.unplayable);
   const session = useSession();
   const ui = useUi.getState();
+  const online = useOnline();
+
+  // Offline: which tracks are stored on this device (played before)?
+  // Those still play from the device cache — everything else dims.
+  const [offlineCached, setOfflineCached] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    if (online) {
+      setOfflineCached(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const ids = new Set<string>();
+      try {
+        if (typeof caches !== "undefined") {
+          for (const name of await caches.keys()) {
+            const cache = await caches.open(name);
+            for (const req of await cache.keys()) {
+              const match = /\/__audio__\/(.+)$/.exec(new URL(req.url).pathname);
+              if (match) ids.add(decodeURIComponent(match[1]));
+            }
+          }
+        }
+      } catch { /* no cache access — treat everything as unplayable */ }
+      if (!cancelled) setOfflineCached(ids);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [online]);
+
+  // Play click routing: when the track is known-unplayable right now,
+  // say so instead of silently failing in the player.
+  const guardPlay = (track: Track) => {
+    const dead = online ? Boolean(unplayable[track.id]) : offlineCached !== null && !offlineCached.has(track.id);
+    if (dead && !online) {
+      ui.showToast("You're offline — only songs you've played before can play.", "info");
+      return;
+    }
+    if (current?.id === track.id) toggle();
+    else playTrack(track, tracks);
+  };
 
   // Warm only the first track: the upstream converter serialises per-key
   // requests, so prefetching several tracks queues real taps behind them.
@@ -76,10 +120,20 @@ export default function TrackList({
       <div className="flex flex-col">
         {tracks.map((track, i) => {
           const isCurrent = current?.id === track.id;
+          // Playability right now: online it depends on whether the track
+          // already failed to resolve; offline only device-saved songs
+          // (audio bytes stored by the service worker) can play.
+          const dead = online
+            ? Boolean(unplayable[track.id])
+            : offlineCached !== null && !offlineCached.has(track.id);
+          const offlinePlayable = !online && offlineCached?.has(track.id);
+          const offlineScanning = !online && offlineCached === null;
           return (
             <div
               key={`${track.id}-${i}`}
-              className="group grid grid-cols-[2rem_1fr_auto] items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-white/4 md:grid-cols-[2rem_4fr_3fr_auto] md:px-3"
+              className={`group grid grid-cols-[2rem_1fr_auto] items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-white/4 md:grid-cols-[2rem_4fr_3fr_auto] md:px-3 ${
+                dead && !offlineScanning ? "opacity-40 saturate-50" : ""
+              }`}
             >
               {/* Index / play state */}
               <div className="flex items-center justify-center">
@@ -101,7 +155,7 @@ export default function TrackList({
                     <button
                       type="button"
                       aria-label={`Play ${track.title}`}
-                      onClick={() => (isCurrent ? toggle() : playTrack(track, tracks))}
+                      onClick={() => guardPlay(track)}
                       className="hidden text-ink group-hover:block"
                     >
                       <Play className="size-4 fill-current" />
@@ -123,7 +177,7 @@ export default function TrackList({
               {/* Title + artist */}
               <button
                 type="button"
-                onClick={() => (isCurrent ? toggle() : playTrack(track, tracks))}
+                onClick={() => guardPlay(track)}
                 className="flex min-w-0 items-center gap-3 text-left"
               >
                 <Artwork src={track.artwork} seed={track.id} label={track.title} alt="" className="size-11 shrink-0 rounded-lg object-cover" />
@@ -143,6 +197,12 @@ export default function TrackList({
                       </Link>
                     ) : (
                       track.artist
+                    )}
+                    {offlinePlayable && (
+                      <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wide text-success">Saved</span>
+                    )}
+                    {!online && !offlinePlayable && offlineCached !== null && (
+                      <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wide text-faint">Offline</span>
                     )}
                   </span>
                 </span>

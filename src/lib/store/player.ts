@@ -34,6 +34,8 @@ interface PlayerState {
   shuffle: boolean;
   repeat: RepeatMode;
   error: string | null;
+  /** Tracks that failed to resolve (id → reason) so lists can dim them. */
+  unplayable: Record<string, string>;
   lyrics: string | null;
   expanded: boolean;
   panelTab: "now" | "lyrics" | "queue";
@@ -132,6 +134,49 @@ async function maybePreloadNext(): Promise<void> {
 
 /** Client-side memo so skipping back never re-hits the API. */
 const inflight = new Map<string, Promise<ResolvedAudio>>();
+
+/* ---------- offline / playability helpers ---------- */
+
+function isOffline(): boolean {
+  return typeof navigator !== "undefined" && !navigator.onLine;
+}
+
+/**
+ * The SW stores played songs' bytes on-device under /__audio__/<tid>.
+ * Offline we can still play those even though `resolve` is unreachable —
+ * point the audio element at the proxy with just the track id and the SW
+ * serves the stored file. Returns the stream URL or null.
+ */
+async function offlineStreamSource(trackId: string): Promise<string | null> {
+  try {
+    if (typeof caches === "undefined") return null;
+    const hit = await caches.match(`/__audio__/${encodeURIComponent(trackId)}`);
+    return hit ? `/api/music/stream?tid=${encodeURIComponent(trackId)}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function markUnplayable(trackId: string, reason: string): void {
+  usePlayerStore.setState((s) => ({ unplayable: { ...s.unplayable, [trackId]: reason } }));
+}
+
+function markPlayable(trackId: string): void {
+  usePlayerStore.setState((s) => {
+    if (!s.unplayable[trackId]) return s;
+    const unplayable = { ...s.unplayable };
+    delete unplayable[trackId];
+    return { unplayable };
+  });
+}
+
+// Back online: everything is playable again.
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    failureStreak = 0;
+    usePlayerStore.setState({ unplayable: {} });
+  });
+}
 
 export async function resolveAudio(track: Track, force = false): Promise<ResolvedAudio> {
   const cached = resolvedCache.get(track.id);
@@ -349,8 +394,40 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
     })();
   } catch (err) {
     if (token !== resolveToken) return;
+
+    // Offline: the resolver is unreachable, but songs already played are
+    // still stored on the device — play directly from the audio cache.
+    if (isOffline()) {
+      const cachedSource = await offlineStreamSource(track.id);
+      if (token !== resolveToken) return;
+      if (!cachedSource) {
+        usePlayerStore.setState({
+          status: "error",
+          error: "You're offline — this song isn't saved on your device.",
+          isPlaying: false,
+        });
+        return;
+      }
+      const cachedResolved = {
+        audioUrl: cachedSource,
+        artwork: track.artwork,
+        duration: track.duration,
+        provider: "ytmp3",
+      } as ResolvedAudio;
+      usePlayerStore.setState({
+        resolved: cachedResolved,
+        lyrics: null,
+        status: "playing",
+        isPlaying: true,
+      });
+      loadSource(audioSourceFor(cachedResolved, track.id), true);
+      updateMediaSession(track, cachedResolved);
+      return;
+    }
+
     const message = err instanceof Error ? err.message : "This track is unavailable right now.";
     usePlayerStore.setState({ status: "error", error: message, isPlaying: false });
+    markUnplayable(track.id, message);
 
     // Don't strand the listener on an unresolvable track: auto-skip to the
     // next queue entry unless failures stack up (max 3 in a row means the
@@ -387,6 +464,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   shuffle: false,
   repeat: "off",
   error: null,
+  unplayable: {},
   lyrics: null,
   expanded: false,
   panelTab: "now",
@@ -411,6 +489,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     el.addEventListener("waiting", () => set({ status: "resolving" }));
     el.addEventListener("playing", () => {
       failureStreak = 0;
+      const id = usePlayerStore.getState().current?.id;
+      if (id) markPlayable(id);
       set({ status: "playing", isPlaying: true, error: null });
       setMediaPlaybackState("playing");
     });
@@ -448,8 +528,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
             set({ resolved, status: "paused", error: null });
           }
         } catch {
+          const message = isOffline()
+            ? "You're offline — this song isn't saved on your device."
+            : "The audio source stopped working. Trying the next available source…";
+          if (!isOffline() && track) markUnplayable(track.id, message);
           set({
-            error: "The audio source stopped working. Trying the next available source…",
+            error: message,
             status: "error",
           });
           setMediaPlaybackState("paused");
