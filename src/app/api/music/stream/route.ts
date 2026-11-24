@@ -91,9 +91,16 @@ async function reResolve(
     };
     const audio = await resolveTrack(track, true);
     if (!audio?.audioUrl) return null;
-    const target = new URL(audio.audioUrl);
+    // The resolver can return either an absolute CDN url or a relative
+    // proxy path (/api/music/stream?url=...) — unwrap the inner url when
+    // relative so we can validate the real target host.
+    const raw = audio.audioUrl.startsWith("/api/music/stream")
+      ? new URL(audio.audioUrl, request.url).searchParams.get("url")
+      : audio.audioUrl;
+    if (!raw) return null;
+    const target = new URL(raw);
     if (target.protocol !== "https:" || !hostAllowed(target.hostname)) return null;
-    return NextResponse.redirect(new URL(rebuildStreamUrl(audio.audioUrl, trackId, providerUrl, title, artist), request.url), 307);
+    return NextResponse.redirect(new URL(rebuildStreamUrl(raw, trackId, providerUrl, title, artist), request.url), 307);
   } catch {
     return null;
   }
