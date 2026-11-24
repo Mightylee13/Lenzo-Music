@@ -240,6 +240,7 @@ export default function PlaylistDetailPage() {
         showAlbum
         playlistId={playlist.id}
         onPlaylistMutated={reload}
+        warmLimit={12}
         emptyMessage={owning ? 'Use any song\'s "..." menu → "Add to this playlist" to fill it up.' : "This playlist is waiting for its first song."}
       />
       {playlist.tracks.length > 0 && (

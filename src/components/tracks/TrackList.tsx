@@ -42,6 +42,8 @@ interface TrackListProps {
   /** Duration column mostly hidden in compact contexts (e.g. mobile search). */
   compact?: boolean;
   emptyMessage?: string;
+  /** How far into the list background warm-up reaches (default 3). */
+  warmLimit?: number;
 }
 
 export default function TrackList({
@@ -52,6 +54,7 @@ export default function TrackList({
   onPlaylistMutated,
   compact = false,
   emptyMessage = "Nothing here yet.",
+  warmLimit = 3,
 }: TrackListProps) {
   const [sheetTrack, setSheetTrack] = useState<Track | null>(null);
   const router = useRouter();
@@ -108,11 +111,19 @@ export default function TrackList({
   // Warm the first few tracks as soon as the list is on screen:
   // resolution only (no audio bytes, no data cost) — so tapping song #1-#3
   // starts instantly, and #4+ inherit the normal next-track prefetch.
+  // Optionally trickles further into the list (albums/playlists pass a
+  // bigger warmLimit), one resolve at a time so the upstream only ever
+  // sees one background call beyond the opening burst.
   useEffect(() => {
     if (!tracks.length) return;
-    const t = setTimeout(() => void prefetchTracks(tracks, 3), 1200);
-    return () => clearTimeout(t);
-  }, [tracks]);
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const limit = Math.min(tracks.length, Math.max(3, warmLimit));
+    timers.push(setTimeout(() => void prefetchTracks(tracks, 3), 1200));
+    for (let i = 3; i < limit; i++) {
+      timers.push(setTimeout(() => void prefetchTracks(tracks.slice(i), 1), 1200 + (i - 2) * 2600));
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [tracks, warmLimit]);
 
   if (tracks.length === 0) {
     return <p className="px-2 py-8 text-center text-sm text-muted">{emptyMessage}</p>;

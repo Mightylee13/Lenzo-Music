@@ -77,7 +77,7 @@ export default function LikedPage() {
           action={<Link href="/login" className="rounded-pill bg-electric px-5 py-2.5 text-xs font-bold text-white hover:bg-cyan">Sign in</Link>}
         />
       ) : (
-        <TrackList tracks={tracks} emptyMessage="Tap the heart on any song and it lands here." />
+        <TrackList tracks={tracks} warmLimit={8} emptyMessage="Tap the heart on any song and it lands here." />
       )}
     </div>
   );

@@ -127,7 +127,7 @@ export default function AlbumPage() {
         </div>
       </header>
 
-      <TrackList tracks={tracks} showIndex showAlbum={false} emptyMessage="This album has no streamable tracks right now." />
+      <TrackList tracks={tracks} showIndex showAlbum={false} warmLimit={12} emptyMessage="This album has no streamable tracks right now." />
       {totalSeconds > 0 && <p className="text-[11px] text-faint">Total run time {formatDuration(totalSeconds)}</p>}
     </div>
   );
