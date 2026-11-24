@@ -105,11 +105,12 @@ export default function TrackList({
     else playTrack(track, tracks);
   };
 
-  // Warm only the first track: the upstream converter serialises per-key
-  // requests, so prefetching several tracks queues real taps behind them.
+  // Warm the first few tracks as soon as the list is on screen:
+  // resolution only (no audio bytes, no data cost) — so tapping song #1-#3
+  // starts instantly, and #4+ inherit the normal next-track prefetch.
   useEffect(() => {
     if (!tracks.length) return;
-    const t = setTimeout(() => void prefetchTracks(tracks, 1), 2000);
+    const t = setTimeout(() => void prefetchTracks(tracks, 3), 1200);
     return () => clearTimeout(t);
   }, [tracks]);
 

@@ -308,21 +308,33 @@ const prefetching = new Set<string>();
 
 /**
  * Warms resolution for the first few tracks of a visible list in the
- * background, so clicking play usually starts instantly. Errors are
- * ignored — the real play path surfaces them.
+ * background, so clicking play usually starts instantly. Runs the batch
+ * concurrently (verified: the upstream API does not serialise parallel
+ * requests for different tracks) and only resolves — no audio bytes are
+ * downloaded, so this costs no data. Errors are ignored — the real play
+ * path surfaces them.
  */
 export async function prefetchTracks(tracks: Track[], count = 2): Promise<void> {
-  for (const track of tracks.slice(0, count)) {
-    if (resolvedCache.has(track.id) || prefetching.has(track.id)) continue;
+  const candidates: Track[] = [];
+  const seen = new Set<string>();
+  for (const track of tracks.slice(0, Math.max(1, count))) {
+    if (resolvedCache.has(track.id) || prefetching.has(track.id) || seen.has(track.id)) continue;
+    seen.add(track.id);
     prefetching.add(track.id);
-    try {
-      await resolveAudio(track, false, { prefetch: true });
-    } catch {
-      /* not playable — the play path will show it */
-    } finally {
-      prefetching.delete(track.id);
-    }
+    candidates.push(track);
   }
+  if (!candidates.length) return;
+  await Promise.allSettled(
+    candidates.map(async (track) => {
+      try {
+        await resolveAudio(track, false, { prefetch: true });
+      } catch {
+        /* not playable — the play path will show it */
+      } finally {
+        prefetching.delete(track.id);
+      }
+    }),
+  );
 }
 
 /**

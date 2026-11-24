@@ -436,6 +436,9 @@ const ALLOWED_HOSTS = [
   "m.youtube.com",
   "music.youtube.com",
   "youtu.be",
+  "soundcloud.com",
+  "www.soundcloud.com",
+  "m.soundcloud.com",
 ];
 
 export function isAllowedProviderUrl(raw: string): boolean {
@@ -447,11 +450,12 @@ export function isAllowedProviderUrl(raw: string): boolean {
   }
 }
 
-function providerFor(url: string): "spotify-v2" | "ytmp3" | null {
+function providerFor(url: string): "spotify-v2" | "ytmp3" | "soundcloud" | null {
   try {
     const host = new URL(url).hostname.toLowerCase();
     if (host.endsWith("spotify.com")) return "spotify-v2";
     if (host.includes("youtube.com") || host.endsWith("youtu.be")) return "ytmp3";
+    if (host.endsWith("soundcloud.com")) return "soundcloud";
   } catch {
     /* not a url */
   }
@@ -494,18 +498,29 @@ function firstSuccess<T>(race: Array<Promise<T>>): Promise<T> {
 
 async function hedgedResolve(
   track: Track,
-  attempts: Array<() => Promise<ResolvedAudio>>,
+  attempts: Array<{ label: string; run: () => Promise<ResolvedAudio> }>,
 ): Promise<ResolvedAudio> {
   // Attempt i joins the race after i head starts — and never after a
   // winner landed (its post-delay check throws immediately).
+  const startedAt = Date.now();
   let settled = false;
   const runners = attempts.map((attempt, i) => {
     const run = (async () => {
       if (i > 0) await new Promise((r) => setTimeout(r, i * HEDGE_HEADSTART_MS));
       if (settled) throw new AttemptRejected("settled");
-      const result = await attempt();
-      if (!result?.audioUrl || !identityMatches(track, result)) throw new AttemptRejected("identity/empty");
-      return result;
+      const attemptStart = Date.now();
+      try {
+        const result = await attempt.run();
+        if (!result?.audioUrl || !identityMatches(track, result)) throw new AttemptRejected("identity/empty");
+        return result;
+      } catch (err) {
+        if (!(err instanceof AttemptRejected)) {
+          console.error(`[resolve] path ${attempt.label} failed after ${Date.now() - attemptStart}ms: ${err instanceof Error ? err.message : err}`);
+        } else {
+          console.error(`[resolve] path ${attempt.label} rejected after ${Date.now() - attemptStart}ms (no streamable match)`);
+        }
+        throw err;
+      }
     })();
     void run.catch(() => undefined); // losing racers are silent
     return run;
@@ -522,7 +537,13 @@ async function hedgedResolve(
     ),
   );
   try {
-    return await firstSuccess(race);
+    const winner = await firstSuccess(race);
+    const ms = Date.now() - startedAt;
+    console.log(`[resolve] ${ms}ms track=${track.id} ${track.title}`);
+    return winner;
+  } catch (err) {
+    console.error(`[resolve] FAILED ${Date.now() - startedAt}ms track=${track.id} ${track.title}: ${err instanceof Error ? err.message : err}`);
+    throw err;
   } finally {
     settled = true;
   }
@@ -567,22 +588,29 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
     const sourceUrl = track.url && isAllowedProviderUrl(track.url) ? track.url : undefined;
     const provider = sourceUrl ? providerFor(sourceUrl) : null;
 
-    const attempts: Array<() => Promise<ResolvedAudio>> = [];
-    if (provider === "spotify-v2") {
-      attempts.push(() => resolveSpotify(sourceUrl!));
-      attempts.push(() => resolveYouTubeFallback(track));
+    const attempts: Array<{ label: string; run: () => Promise<ResolvedAudio> }> = [];
+    if (provider === "soundcloud") {
+      // Direct SoundCloud conversion first (~2-5s when its CDN serves),
+      // then the YouTube search path (reliable, ~12s) before the much
+      // slower Spotify matching chain.
+      attempts.push({ label: "soundcloud-direct", run: () => resolveSoundcloud(sourceUrl!) });
+      attempts.push({ label: "youtube-fallback", run: () => resolveYouTubeFallback(track) });
+      attempts.push({ label: "spotify-fallback", run: () => resolveSpotifyFallback(track) });
+    } else if (provider === "spotify-v2") {
+      attempts.push({ label: "spotify-v2", run: () => resolveSpotify(sourceUrl!) });
+      attempts.push({ label: "youtube-fallback", run: () => resolveYouTubeFallback(track) });
     } else if (provider === "ytmp3") {
-      attempts.push(() => resolveYouTube(sourceUrl!));
-      attempts.push(() => resolveSpotifyFallback(track));
+      attempts.push({ label: "ytmp3", run: () => resolveYouTube(sourceUrl!) });
+      attempts.push({ label: "spotify-fallback", run: () => resolveSpotifyFallback(track) });
     } else {
       // No usable provider link (e.g. a SoundCloud-only search hit):
       // match the song on Spotify, then fall back to a YouTube search.
-      attempts.push(() => resolveSpotifyFallback(track));
-      attempts.push(() => resolveYouTubeFallback(track));
+      attempts.push({ label: "spotify-fallback", run: () => resolveSpotifyFallback(track) });
+      attempts.push({ label: "youtube-fallback", run: () => resolveYouTubeFallback(track) });
     }
     // Last resort for every path — the local backup engine (yt-dlp),
     // which streams directly from YouTube/SoundCloud with no converter.
-    attempts.push(() => backupResolve(track));
+    attempts.push({ label: "backup", run: () => backupResolve(track) });
 
     // Hedged race: the best path starts alone; if it hasn't landed within
     // a head start, the next path joins, and so on. First identity-verified
@@ -625,20 +653,80 @@ function identityMatches(track: Track, resolved: ResolvedAudio): boolean {
   return true;
 }
 
-async function resolveYouTube(url: string): Promise<ResolvedAudio> {
-  const raw = (await callUpstream({ endpoint: "download.ytmp3", params: { url }, timeoutMs: 25000 })) as Record<string, unknown>;
-  const audioUrl = str(raw.download_url);
-  if (!audioUrl) throw new Error("YouTube converter returned no audio URL");
-  const probe = await probeAudioUrl(audioUrl);
-  if (!probe.ok) throw new Error("YouTube audio CDN is not responding");
+/**
+ * Fast path for the app's primary search source: a SoundCloud permalink
+ * converts to a permanent direct-link MP3 in ~2-3s — much faster than the
+ * old chain that first matched the song on Spotify and converted there.
+ * duration arrives in seconds, not ms.
+ */
+/** How long to wait before re-asking the (caching) converter for a link. */
+const CONVERT_RETRY_WAIT_MS = 2000;
+
+/**
+ * Convert + probe. When a conversion finishes, its CDN file sometimes
+ * needs a few extra seconds before it answers — and a failed probe used
+ * to throw away a perfectly good conversion, sending the listener down
+ * the whole fallback chain (~25s). The upstream caches finished
+ * conversions, so re-asking once (cheap, ~2s) usually returns a link
+ * that is ready.
+ */
+async function probeConverted(
+  label: string,
+  getRaw: () => Promise<Record<string, unknown>>,
+  pickAudioUrl: (raw: Record<string, unknown>) => string | undefined,
+): Promise<{ audioUrl: string; range: boolean; raw: Record<string, unknown> }> {
+  const raw = await getRaw();
+  const audioUrl = pickAudioUrl(raw);
+  if (!audioUrl) throw new Error(`${label} converter returned no audio URL`);
+  const first = await probeAudioUrl(audioUrl);
+  if (first.ok) return { audioUrl, range: first.range, raw };
+
+  // Freshly created files on the upstream's CDN sometimes 502 for a few
+  // seconds while the file settles. Wait once and re-probe the SAME link
+  // (other hedged racers run in parallel, so this costs no wall clock).
+  await new Promise((r) => setTimeout(r, CONVERT_RETRY_WAIT_MS));
+  const settle = await probeAudioUrl(audioUrl);
+  if (settle.ok) return { audioUrl, range: settle.range, raw };
+
+  await new Promise((r) => setTimeout(r, CONVERT_RETRY_WAIT_MS));
+  const raw2 = await getRaw();
+  const audioUrl2 = pickAudioUrl(raw2) ?? audioUrl;
+  const second = await probeAudioUrl(audioUrl2);
+  if (!second.ok) throw new Error(`${label} audio CDN is not responding`);
+  return { audioUrl: audioUrl2, range: second.range, raw: raw2 };
+}
+
+async function resolveSoundcloud(url: string): Promise<ResolvedAudio> {
+  const call = async () =>
+    (await callUpstream({ endpoint: "download.soundcloud", params: { url }, timeoutMs: 30000 })) as Record<string, unknown>;
+  const { audioUrl, range, raw } = await probeConverted("SoundCloud", call, (r) => {
+    const result = (r.result ?? r) as Record<string, unknown>;
+    return str(result.download_url) || str(result.direct_url) || str(result.stream_url) || undefined;
+  });
+  const result = (raw.result ?? raw) as Record<string, unknown>;
   return {
-    audioUrl: probe.range ? audioUrl : streamProxyUrl(audioUrl),
+    audioUrl: range ? audioUrl : streamProxyUrl(audioUrl),
+    duration: typeof result.duration === "number" && result.duration > 0 ? Math.round(result.duration) : undefined,
+    artwork: typeof result.thumbnail === "string" ? result.thumbnail : undefined,
+    title: typeof result.title === "string" ? result.title : undefined,
+    artist: typeof result.artist === "string" ? result.artist : undefined,
+    quality: "MP3",
+    provider: "soundcloud",
+  };
+}
+
+async function resolveYouTube(url: string): Promise<ResolvedAudio> {
+  const call = async () =>
+    (await callUpstream({ endpoint: "download.ytmp3", params: { url }, timeoutMs: 25000 })) as Record<string, unknown>;
+  const { audioUrl, range, raw } = await probeConverted("YouTube", call, (r) => str(r.download_url) || undefined);
+  return {
+    audioUrl: range ? audioUrl : streamProxyUrl(audioUrl),
     duration: typeof raw.duration_sec === "number" ? raw.duration_sec : undefined,
     artwork: typeof raw.thumbnail === "string" ? raw.thumbnail : undefined,
     title: typeof raw.title === "string" ? raw.title : undefined,
     artist: typeof raw.channel === "string" ? raw.channel : undefined,
     lyrics: typeof raw.lyrics === "string" && raw.lyrics.trim() ? raw.lyrics : undefined,
-    quality: typeof raw.mimetype === "string" ? "MP3" : "MP3",
+    quality: "MP3",
     provider: "ytmp3",
   };
 }
