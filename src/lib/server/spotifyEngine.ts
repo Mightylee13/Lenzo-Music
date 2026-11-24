@@ -56,6 +56,14 @@ interface EngineState {
   resolveCache: Map<string, { ts: number; ok: boolean; value: EngineYtPick | null }>;
   /** videoId → googlevideo url (SAME-INSTANCE ONLY — never cross IP) */
   streamCache: Map<string, { ts: number; url: string; mimeType: string | null; contentLength: number | null; lengthSeconds: number | null }>;
+  /**
+   * Datacenter bot-block detection: Google's player API answers
+   * LOGIN_REQUIRED ("Sign in to confirm you're not a bot") for every
+   * client when the caller IP is a cloud/datacenter IP — verified live on
+   * Vercel. The caller should then hand judged video ids to a converter
+   * instead of burning time on the player. 0 = player believed fine.
+   */
+  playerBlockedUntil: number;
 }
 
 const STATE_KEY = "__lenzo_spotify_engine__" as const;
@@ -70,6 +78,7 @@ function state(): EngineState {
       searchCache: new Map(),
       resolveCache: new Map(),
       streamCache: new Map(),
+      playerBlockedUntil: 0,
     };
     g[STATE_KEY] = s;
   }
@@ -520,6 +529,19 @@ interface YtAudio {
   lengthSeconds: number | null;
 }
 
+/** How long a detected datacenter bot-block stops playback attempts. */
+const PLAYER_BLOCK_TTL = 30 * 60 * 1000;
+
+/** True when Google's player API bot-blocks this IP (e.g. on Vercel). */
+export function enginePlayerBlocked(): boolean {
+  return state().playerBlockedUntil > Date.now();
+}
+
+function markPlayerBlocked(): void {
+  state().playerBlockedUntil = Date.now() + PLAYER_BLOCK_TTL;
+  console.log("[engine] youtube player bot-blocked on this IP — playback attempts disabled for 30min");
+}
+
 /**
  * Resolve a videoId into a DIRECT googlevideo audio URL.
  * Same-instance only — see the IP rule at the top of this file.
@@ -532,6 +554,7 @@ export async function engineYtAudio(videoId: string, force = false): Promise<{ u
     return { url: hit.url, mimeType: hit.mimeType, contentLength: hit.contentLength, lengthSeconds: hit.lengthSeconds };
   }
   let last: YtAudio | null = null;
+  let botBlocked = false;
   for (const client of YT_CLIENTS) {
     try {
       const pRes = await tf(
@@ -549,10 +572,15 @@ export async function engineYtAudio(videoId: string, force = false): Promise<{ u
         8000,
       );
       const pJson = (await pRes.json()) as Unknown;
-      if (String(asRecord(pJson?.playabilityStatus)?.status) === "LOGIN_REQUIRED") continue;
+      const status = String(asRecord(pJson?.playabilityStatus)?.status);
+      if (status === "LOGIN_REQUIRED") {
+        botBlocked = true;
+        continue;
+      }
       const streaming = asRecord(pJson?.streamingData);
       const picked = pickAudio([...(Array.isArray(streaming?.adaptiveFormats) ? streaming.adaptiveFormats : []), ...(Array.isArray(streaming?.formats) ? streaming.formats : [])]);
       if (picked) {
+        s.playerBlockedUntil = 0;
         last = { ...picked, client: client.clientName, lengthSeconds: Number(asRecord(pJson?.videoDetails)?.lengthSeconds) || null };
         break;
       }
@@ -561,6 +589,7 @@ export async function engineYtAudio(videoId: string, force = false): Promise<{ u
     }
   }
   if (!last?.url) {
+    if (botBlocked) markPlayerBlocked();
     if (hit) s.streamCache.delete(videoId); // stale cached url stopped working
     return null;
   }
@@ -611,11 +640,14 @@ function scoreCandidate(hit: { titleTxt: string; channel: string; idx: number },
 
 /**
  * Full-length playback pick for a wanted song: search YouTube (music-biased
- * query), judge every candidate for identity, then resolve the best one on
- * the spot (turning the pick into a REAL playability check — a candidate
- * with no clear audio is skipped, not returned).
+ * query), judge every candidate for identity, then — when `prove` — resolve
+ * the best one on the spot (turning the pick into a REAL playability check;
+ * a candidate with no clear audio is skipped, not returned). With prove off
+ * (converter-hand-off mode, e.g. when this IP is bot-blocked) the judge is
+ * the gatekeeper and the converter's own probe checks playability.
  */
-async function engineYtPick(want: { title: string; artist: string }): Promise<EngineYtPick | null> {
+async function engineYtPick(want: { title: string; artist: string }, opts: { prove?: boolean } = {}): Promise<EngineYtPick | null> {
+  const prove = opts.prove !== false;
   if (!want.title) return null;
   const q = [want.title, want.artist, "official audio"].filter(Boolean).join(" ");
   try {
@@ -661,6 +693,18 @@ async function engineYtPick(want: { title: string; artist: string }): Promise<En
     candidates.sort((a, b) => scoreCandidate(b, want) - scoreCandidate(a, want));
     for (const video of candidates) {
       if (scoreCandidate(video, want) < 0.4) break; // nothing looks like the song
+      if (!prove) {
+        // Judged but unproven — the caller (converter hand-off) verifies
+        // actual playability itself.
+        return {
+          videoId: video.videoId,
+          youtubeTitle: video.titleTxt,
+          watchUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
+          durationSec: null,
+          bitrate: null,
+          client: "engine",
+        };
+      }
       const audio = await engineYtAudio(video.videoId);
       if (audio?.url) {
         return {
@@ -694,10 +738,11 @@ export interface EngineResolution {
  * full-length YouTube source. Cached per canonical query — unless forced
  * (a stale pick is being retried after its audio failed mid-stream).
  */
-export async function engineResolve(want: { title: string; artist: string }, force = false): Promise<EngineResolution | null> {
+export async function engineResolve(want: { title: string; artist: string }, force = false, opts: { prove?: boolean } = {}): Promise<EngineResolution | null> {
   const title = want.title.trim();
   const artist = want.artist.trim();
   if (!title) return null;
+  const prove = opts.prove !== false;
   const s = state();
   const key = `r:${slug(title)}::${slug(artist.split(",")[0])}`;
   const hit = force ? undefined : s.resolveCache.get(key);
@@ -725,14 +770,14 @@ export async function engineResolve(want: { title: string; artist: string }, for
           return covered >= 0.5;
         }) ?? null;
       if (canonical) {
-        const p = await engineYtPick({ title: canonical.title, artist: canonical.artist });
+        const p = await engineYtPick({ title: canonical.title, artist: canonical.artist }, { prove });
         if (p) return p;
       }
     } catch {
       /* catalogue down — try the raw title below */
     }
     // 2. Raw title/artist with the judge as the gatekeeper.
-    return await engineYtPick({ title, artist });
+    return await engineYtPick({ title, artist }, { prove });
   };
 
   try {

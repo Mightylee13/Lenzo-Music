@@ -20,6 +20,7 @@ import { rememberTrack } from "@/lib/server/trackRegistry";
 import {
   engineAlbumToAlbum,
   engineArtistToArtist,
+  enginePlayerBlocked,
   engineResolve,
   engineSearchRaw,
   engineTrackToTrack,
@@ -633,7 +634,7 @@ function engineStreamUrl(res: EngineResolution, track: Track): string {
 }
 
 async function resolveViaEngine(track: Track, force = false): Promise<ResolvedAudio> {
-  const res = await engineResolve({ title: track.title, artist: track.artist }, force);
+  const res = await engineResolve({ title: track.title, artist: track.artist }, force, { prove: true });
   if (!res) throw new Error("engine found no full-length audio");
   const resolved: ResolvedAudio = {
     audioUrl: engineStreamUrl(res, track),
@@ -684,10 +685,12 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
       );
     }
 
-    // 0. THE ENGINE, as the sole runner: it wins in ~2s when healthy and
-    // the mirror API does no work at all. Only a real engine failure or
-    // the 10s window opens the fallback line below.
-    if (track.title) {
+    // 0. THE ENGINE, as the sole runner WHEN its direct playback path is
+    // usable. Inside Google-bot-blocked networks (verified: every Vercel
+    // lambda IP) engineYtAudio flips enginePlayerBlocked() — then this
+    // attempt is skipped instantly and the judged hand-off below feeds the
+    // mirror API instead, so no resolve ever pays a 10s dead window.
+    if (track.title && !enginePlayerBlocked()) {
       try {
         const engineStart = Date.now();
         const engineAudio = await withTimeout(resolveViaEngine(track, force), ENGINE_WINDOW_MS);
@@ -695,9 +698,9 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
         return engineAudio;
       } catch (engineErr) {
         console.error(
-          `[resolve] engine did not serve ${track.id} after ${ENGINE_WINDOW_MS}ms window: ${
+          `[resolve] engine did not serve ${track.id}: ${
             engineErr instanceof Error ? engineErr.message : engineErr
-          } — mirror API takes over`,
+          }${enginePlayerBlocked() ? ` (player bot-blocked — direct hand-off until it re-checks)` : ""} — mirror API takes over`,
         );
       }
     }
@@ -708,20 +711,24 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
     const attempts: Array<{ label: string; run: () => Promise<ResolvedAudio> }> = [];
     if (provider === "soundcloud") {
       // Direct SoundCloud conversion first (~2-5s when its CDN serves),
-      // then the YouTube search path (reliable, ~12s) before the much
-      // slower Spotify matching chain.
+      // then the judged YouTube path (search+judge is ours; conversion is
+      // the mirror's), then the much slower Spotify matching chain.
       attempts.push({ label: "soundcloud-direct", run: () => resolveSoundcloud(sourceUrl!) });
+      attempts.push({ label: "youtube-judged", run: () => resolveYouTubeJudged(track) });
       attempts.push({ label: "youtube-fallback", run: () => resolveYouTubeFallback(track) });
       attempts.push({ label: "spotify-fallback", run: () => resolveSpotifyFallback(track) });
     } else if (provider === "spotify-v2") {
       attempts.push({ label: "spotify-v2", run: () => resolveSpotify(sourceUrl!) });
+      attempts.push({ label: "youtube-judged", run: () => resolveYouTubeJudged(track) });
       attempts.push({ label: "youtube-fallback", run: () => resolveYouTubeFallback(track) });
     } else if (provider === "ytmp3") {
       attempts.push({ label: "ytmp3", run: () => resolveYouTube(sourceUrl!) });
+      attempts.push({ label: "youtube-judged", run: () => resolveYouTubeJudged(track) });
       attempts.push({ label: "spotify-fallback", run: () => resolveSpotifyFallback(track) });
     } else {
       // No usable provider link (e.g. a SoundCloud-only search hit):
-      // match the song on Spotify, then fall back to a YouTube search.
+      // judge YouTube first (best identity), then the Spotify match.
+      attempts.push({ label: "youtube-judged", run: () => resolveYouTubeJudged(track) });
       attempts.push({ label: "spotify-fallback", run: () => resolveSpotifyFallback(track) });
       attempts.push({ label: "youtube-fallback", run: () => resolveYouTubeFallback(track) });
     }
@@ -830,6 +837,19 @@ async function resolveSoundcloud(url: string): Promise<ResolvedAudio> {
     quality: "MP3",
     provider: "soundcloud",
   };
+}
+
+/**
+ * Engine judge → converter hand-off. The judge needs only the YouTube
+ * SEARCH api (works from serverless/datacenter IPs — verified), so the
+ * WRONG-SONG defence survives on Vercel even while Google bot-blocks
+ * direct googlevideo playback there. The judged watch url goes to the
+ * mirror's ytmp3 converter, whose own probe guarantees playable bytes.
+ */
+async function resolveYouTubeJudged(track: Track): Promise<ResolvedAudio> {
+  const res = await engineResolve({ title: track.title, artist: track.artist }, false, { prove: false });
+  if (!res?.watchUrl) throw new Error("engine judged no YouTube match");
+  return resolveYouTube(res.watchUrl);
 }
 
 async function resolveYouTube(url: string): Promise<ResolvedAudio> {
