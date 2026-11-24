@@ -549,6 +549,10 @@ function markPlayerBlocked(): void {
 export async function engineYtAudio(videoId: string, force = false): Promise<{ url: string; mimeType: string | null; contentLength: number | null; lengthSeconds: number | null } | null> {
   if (!/^[A-Za-z0-9_-]{8,16}$/.test(videoId)) return null;
   const s = state();
+  // A freshly detected bot-block short-circuits every further player call
+  // on this instance — proof loops must not re-run all 4 blocked clients
+  // per candidate.
+  if (!force && s.playerBlockedUntil > Date.now()) return null;
   const hit = s.streamCache.get(videoId);
   if (hit && !force && Date.now() - hit.ts < STREAM_TTL) {
     return { url: hit.url, mimeType: hit.mimeType, contentLength: hit.contentLength, lengthSeconds: hit.lengthSeconds };
@@ -646,7 +650,7 @@ function scoreCandidate(hit: { titleTxt: string; channel: string; idx: number },
  * (converter-hand-off mode, e.g. when this IP is bot-blocked) the judge is
  * the gatekeeper and the converter's own probe checks playability.
  */
-async function engineYtPick(want: { title: string; artist: string }, opts: { prove?: boolean } = {}): Promise<EngineYtPick | null> {
+async function engineYtPick(want: { title: string; artist: string }, opts: { prove?: boolean } = {}): Promise<{ kind: "ok"; pick: EngineYtPick } | { kind: "unprovable" } | null> {
   const prove = opts.prove !== false;
   if (!want.title) return null;
   const q = [want.title, want.artist, "official audio"].filter(Boolean).join(" ");
@@ -691,33 +695,42 @@ async function engineYtPick(want: { title: string; artist: string }, opts: { pro
       }));
 
     candidates.sort((a, b) => scoreCandidate(b, want) - scoreCandidate(a, want));
-    for (const video of candidates) {
-      if (scoreCandidate(video, want) < 0.4) break; // nothing looks like the song
+    const judged = candidates.map((c) => ({ c, score: scoreCandidate(c, want) }));
+    for (const { c: video, score } of judged) {
+      if (score < 0.4) break; // nothing looks like the song
       if (!prove) {
         // Judged but unproven — the caller (converter hand-off) verifies
         // actual playability itself.
         return {
-          videoId: video.videoId,
-          youtubeTitle: video.titleTxt,
-          watchUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
-          durationSec: null,
-          bitrate: null,
-          client: "engine",
+          kind: "ok",
+          pick: {
+            videoId: video.videoId,
+            youtubeTitle: video.titleTxt,
+            watchUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
+            durationSec: null,
+            bitrate: null,
+            client: "engine",
+          },
         };
       }
       const audio = await engineYtAudio(video.videoId);
       if (audio?.url) {
         return {
-          videoId: video.videoId,
-          youtubeTitle: video.titleTxt,
-          watchUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
-          durationSec: audio.lengthSeconds,
-          bitrate: null,
-          client: "engine",
+          kind: "ok",
+          pick: {
+            videoId: video.videoId,
+            youtubeTitle: video.titleTxt,
+            watchUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
+            durationSec: audio.lengthSeconds,
+            bitrate: null,
+            client: "engine",
+          },
         };
       }
     }
-    return null;
+    // Judge PASSED on at least one candidate but none proved playable —
+    // this is NOT "no match" and must not poison the negative cache.
+    return judged.length > 0 && Math.max(...judged.map((j) => j.score)) >= 0.4 ? { kind: "unprovable" } : null;
   } catch {
     return null;
   }
@@ -748,7 +761,7 @@ export async function engineResolve(want: { title: string; artist: string }, for
   const hit = force ? undefined : s.resolveCache.get(key);
   if (hit && Date.now() - hit.ts < (hit.ok ? RESOLVE_TTL_OK : RESOLVE_TTL_FAIL)) return hit.value ? { ...hit.value } : null;
 
-  const pick = async (): Promise<EngineYtPick | null> => {
+  const pick = async (): Promise<{ kind: "ok"; pick: EngineYtPick } | { kind: "unprovable" } | null> => {
     // 1. Canonical title/artist from the catalogue — but ONLY when the
     // catalogue's title actually resembles what was asked. Spotify's own
     // ranking can surface a DIFFERENT song first for a query ("lifestyle
@@ -771,7 +784,8 @@ export async function engineResolve(want: { title: string; artist: string }, for
         }) ?? null;
       if (canonical) {
         const p = await engineYtPick({ title: canonical.title, artist: canonical.artist }, { prove });
-        if (p) return p;
+        if (p?.kind === "ok") return p;
+        if (p?.kind === "unprovable") return p;
       }
     } catch {
       /* catalogue down — try the raw title below */
@@ -782,11 +796,21 @@ export async function engineResolve(want: { title: string; artist: string }, for
 
   try {
     const best = await pick();
+    if (best?.kind === "ok") {
+      evictIfNeeded(s.resolveCache);
+      s.resolveCache.set(key, { ts: Date.now(), ok: true, value: best.pick });
+      return { videoId: best.pick.videoId, youtubeTitle: best.pick.youtubeTitle, watchUrl: best.pick.watchUrl, durationSec: best.pick.durationSec };
+    }
+    if (best?.kind === "unprovable") {
+      // The judge found the right video (proof failed: bot-block, region or
+      // dead candidate). NO negative cache — the judged hand-off must be
+      // able to run right after this.
+      return null;
+    }
+    // Genuine "no match" — negative cache so repeat queries fail fast.
     evictIfNeeded(s.resolveCache);
-    s.resolveCache.set(key, { ts: Date.now(), ok: Boolean(best), value: best });
-    return best
-      ? { videoId: best.videoId, youtubeTitle: best.youtubeTitle, watchUrl: best.watchUrl, durationSec: best.durationSec }
-      : null;
+    s.resolveCache.set(key, { ts: Date.now(), ok: false, value: null });
+    return null;
   } catch (err) {
     evictIfNeeded(s.resolveCache);
     s.resolveCache.set(key, { ts: Date.now(), ok: false, value: null });
