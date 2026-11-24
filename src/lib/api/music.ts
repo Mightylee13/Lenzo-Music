@@ -458,6 +458,76 @@ function providerFor(url: string): "spotify-v2" | "ytmp3" | null {
   return null;
 }
 
+/** How long an attempt gets as sole runner before the next joins (hedged start). */
+const HEDGE_HEADSTART_MS = 4500;
+
+class AttemptRejected extends Error {}
+
+/**
+ * First-success race where later attempts only start if the earlier ones
+ * haven't won within head starts. Measured on this upstream: parallel
+ * resolves for different tracks/scripts do NOT serialise (two resolves
+ * finished in ~6s total), so hedging genuinely shortens starts — instead
+ * of a dead converter blocking every fallback behind a 45s timeout.
+ * Rejections of losing racers are swallowed.
+ */
+function firstSuccess<T>(race: Array<Promise<T>>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let pending = race.length;
+    if (!pending) {
+      reject(new Error("No resolution paths"));
+      return;
+    }
+    let firstError: unknown = null;
+    for (const p of race) {
+      p.then(
+        (v) => resolve(v),
+        (e) => {
+          if (firstError === null) firstError = e;
+          pending -= 1;
+          if (pending === 0) reject(firstError);
+        },
+      );
+    }
+  });
+}
+
+async function hedgedResolve(
+  track: Track,
+  attempts: Array<() => Promise<ResolvedAudio>>,
+): Promise<ResolvedAudio> {
+  // Attempt i joins the race after i head starts — and never after a
+  // winner landed (its post-delay check throws immediately).
+  let settled = false;
+  const runners = attempts.map((attempt, i) => {
+    const run = (async () => {
+      if (i > 0) await new Promise((r) => setTimeout(r, i * HEDGE_HEADSTART_MS));
+      if (settled) throw new AttemptRejected("settled");
+      const result = await attempt();
+      if (!result?.audioUrl || !identityMatches(track, result)) throw new AttemptRejected("identity/empty");
+      return result;
+    })();
+    void run.catch(() => undefined); // losing racers are silent
+    return run;
+  });
+  const race = runners.map((run) =>
+    run.then(
+      (v) => {
+        settled = true;
+        return v;
+      },
+      (e) => {
+        throw e;
+      },
+    ),
+  );
+  try {
+    return await firstSuccess(race);
+  } finally {
+    settled = true;
+  }
+}
+
 /**
  * Resolve a track into a directly streamable audio URL.
  *
@@ -514,27 +584,17 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
     // which streams directly from YouTube/SoundCloud with no converter.
     attempts.push(() => backupResolve(track));
 
-    // Converters are tried strictly in order. The upstream API serialises
-    // requests per key (parallel calls queue behind each other there), so
-    // racing makes starts SLOWER, not faster. One wire, best path first:
-    // spotify-v2 (~3.7s measured), then the YouTube fallback.
-    let lastError: unknown = null;
-    for (const attempt of attempts) {
-      try {
-        const result = await attempt();
-        if (result?.audioUrl && identityMatches(track, result)) return result;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-
-    throw new ApiError(
-      lastError instanceof Error
-        ? `Could not find streamable audio: ${lastError.message}`
-        : "Could not find streamable audio for this track",
-      404,
-      "resolve",
-    );
+    // Hedged race: the best path starts alone; if it hasn't landed within
+    // a head start, the next path joins, and so on. First identity-verified
+    // success wins — a dead/slow converter no longer blocks every fallback
+    // behind it, which is what made starts take 30-60s.
+    return await hedgedResolve(track, attempts).catch((err: unknown) => {
+      throw new ApiError(
+        `Could not find streamable audio: ${err instanceof Error ? err.message : "unknown"}`,
+        404,
+        "resolve",
+      );
+    });
   });
 }
 
@@ -566,7 +626,7 @@ function identityMatches(track: Track, resolved: ResolvedAudio): boolean {
 }
 
 async function resolveYouTube(url: string): Promise<ResolvedAudio> {
-  const raw = (await callUpstream({ endpoint: "download.ytmp3", params: { url }, timeoutMs: 45000 })) as Record<string, unknown>;
+  const raw = (await callUpstream({ endpoint: "download.ytmp3", params: { url }, timeoutMs: 25000 })) as Record<string, unknown>;
   const audioUrl = str(raw.download_url);
   if (!audioUrl) throw new Error("YouTube converter returned no audio URL");
   const probe = await probeAudioUrl(audioUrl);
@@ -652,7 +712,7 @@ async function resolveSpotify(url: string): Promise<ResolvedAudio> {
 
   for (const endpoint of endpoints) {
     try {
-      const raw = (await callUpstream({ endpoint, params: { url }, timeoutMs: 45000 })) as Record<string, unknown>;
+      const raw = (await callUpstream({ endpoint, params: { url }, timeoutMs: 20000 })) as Record<string, unknown>;
       const result = (raw?.result ?? {}) as Record<string, unknown>;
       const downloads = (result.downloads ?? {}) as Record<string, unknown>;
       const audioUrl = str(downloads.mp3) || str((result as Record<string, unknown>).download_url) || findMp3Url(raw);

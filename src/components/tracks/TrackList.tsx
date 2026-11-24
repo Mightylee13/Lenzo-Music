@@ -180,6 +180,10 @@ export default function TrackList({
               <button
                 type="button"
                 onClick={() => guardPlay(track)}
+                // Hover / first touch anywhere on a row warms its audio
+                // source, so the actual tap usually starts instantly.
+                onPointerEnter={() => prefetchTracks([track], 1)}
+                onTouchStart={() => prefetchTracks([track], 1)}
                 className="flex min-w-0 items-center gap-3 text-left"
               >
                 <Artwork src={track.artwork} seed={track.id} label={track.title} alt="" className="size-11 shrink-0 rounded-lg object-cover" />

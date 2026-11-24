@@ -8,7 +8,7 @@ import "server-only";
    cannot be seeked forward by the browser).
    ============================================================ */
 
-export async function probeAudioUrl(url: string, timeoutMs = 7000): Promise<{ ok: boolean; range: boolean }> {
+export async function probeAudioUrl(url: string, timeoutMs = 4000): Promise<{ ok: boolean; range: boolean }> {
   const attempt = async (): Promise<{ ok: boolean; range: boolean }> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);

@@ -258,7 +258,7 @@ export async function resolveAudio(
   // would otherwise queue the user's own resolution behind it and make
   // starts feel slow, especially after a long song.
   const controller = new AbortController();
-  if (opts.prefetch) prefetchControllers.add(controller);
+  if (opts.prefetch) prefetchControllers.set(controller, track.id);
 
   const promise = fetch("/api/music/resolve", {
     method: "POST",
@@ -277,18 +277,30 @@ export async function resolveAudio(
     })
     .finally(() => {
       inflight.delete(track.id);
-      prefetchControllers.delete(controller);
+      prefetchControllers.forEach((id, ctrl) => {
+        if (ctrl === controller) prefetchControllers.delete(ctrl);
+      });
     });
   inflight.set(track.id, promise);
   return promise;
 }
 
-/** Abortable wires of currently running background prefetches. */
-const prefetchControllers = new Set<AbortController>();
+/** Abortable wires of currently running background prefetches (by track id). */
+const prefetchControllers = new Map<AbortController, string>();
 
 /** Kill any in-flight prefetch so the user's own resolution goes first. */
 function abortPrefetches(): void {
-  for (const controller of prefetchControllers) controller.abort();
+  for (const [controller, trackId] of prefetchControllers) {
+    controller.abort();
+    // Drop the aborted wire from inflight IMMEDIATELY, so a click landing
+    // right now never reuses a promise that is about to reject with
+    // AbortError (it would look like an unplayable track).
+    const pending = inflight.get(trackId);
+    if (pending) {
+      void pending.catch(() => undefined); // its rejection is expected now
+      inflight.delete(trackId);
+    }
+  }
   prefetchControllers.clear();
 }
 
