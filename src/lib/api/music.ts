@@ -527,7 +527,15 @@ function providerFor(url: string): "spotify-v2" | "ytmp3" | "soundcloud" | null 
 }
 
 /** How long an attempt gets as sole runner before the next joins (hedged start). */
-const HEDGE_HEADSTART_MS = 4500;
+const HEDGE_HEADSTART_MS = 3500;
+/**
+ * One hung/slow converter can never hold the whole resolve: every attempt
+ * is raced against this per-attempt ceiling, and the whole hedge is raced
+ * against RESOLVE_DEADLINE_MS so the user gets an honest error quickly
+ * instead of a 45s spinner (measured failure before this: 45s + FAIL).
+ */
+const ATTEMPT_TIMEOUT_MS = 12000;
+const RESOLVE_DEADLINE_MS = 24000;
 
 class AttemptRejected extends Error {}
 
@@ -574,7 +582,7 @@ async function hedgedResolve(
       if (settled) throw new AttemptRejected("settled");
       const attemptStart = Date.now();
       try {
-        const result = await attempt.run();
+        const result = await withTimeout(attempt.run(), ATTEMPT_TIMEOUT_MS, `${attempt.label} timed out`);
         if (!result?.audioUrl || !identityMatches(track, result)) throw new AttemptRejected("identity/empty");
         return result;
       } catch (err) {
@@ -623,7 +631,7 @@ async function hedgedResolve(
  * started. The engine wins in ~2s cold / ~0.6s warm (measured), so the
  * mirror API only does work when the engine is genuinely down or stuck.
  */
-const ENGINE_WINDOW_MS = 10000;
+const ENGINE_WINDOW_MS = 6000;
 
 /** Reject after `ms` so one hung engine fetch cannot hold the whole resolve. */
 function withTimeout<T>(p: Promise<T>, ms: number, label = "engine window exceeded"): Promise<T> {
@@ -750,8 +758,13 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
     // Hedged race: the best path starts alone; if it hasn't landed within
     // a head start, the next path joins, and so on. First identity-verified
     // success wins — a dead/slow converter no longer blocks every fallback
-    // behind it, which is what made starts take 30-60s.
-    return await hedgedResolve(track, attempts).catch((err: unknown) => {
+    // behind it, which is what made starts take 30-60s. The whole race is
+    // also hard-capped so all-paths-dead resolves fail in ~24s, not 45s+.
+    return await withTimeout(
+      hedgedResolve(track, attempts),
+      RESOLVE_DEADLINE_MS,
+      "resolve deadline exceeded",
+    ).catch((err: unknown) => {
       throw new ApiError(
         `Could not find streamable audio: ${err instanceof Error ? err.message : "unknown"}`,
         404,
