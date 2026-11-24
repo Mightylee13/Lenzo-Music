@@ -78,7 +78,10 @@ async function reResolve(
   title: string | null,
   artist: string | null,
 ): Promise<Response | null> {
-  if (!providerUrl || isSoundCloudSet(providerUrl)) return null;
+  const fail = (reason: string): Response | null =>
+    NextResponse.json({ error: `A valid allow-listed audio url is required`, rescue: reason }, { status: 403 });
+  if (!providerUrl) return fail("no-provider-url");
+  if (isSoundCloudSet(providerUrl)) return fail("soundcloud-set");
   try {
     const track: Track = {
       id: trackId ?? "recovered",
@@ -90,19 +93,17 @@ async function reResolve(
       duration: 0,
     };
     const audio = await resolveTrack(track, true);
-    if (!audio?.audioUrl) return null;
-    // The resolver can return either an absolute CDN url or a relative
-    // proxy path (/api/music/stream?url=...) — unwrap the inner url when
-    // relative so we can validate the real target host.
+    if (!audio?.audioUrl) return fail("resolve-empty");
+    // Unwrap relative proxy paths to the real inner url.
     const raw = audio.audioUrl.startsWith("/api/music/stream")
       ? new URL(audio.audioUrl, request.url).searchParams.get("url")
       : audio.audioUrl;
-    if (!raw) return null;
+    if (!raw) return fail("no-inner-url");
     const target = new URL(raw);
-    if (target.protocol !== "https:" || !hostAllowed(target.hostname)) return null;
+    if (target.protocol !== "https:" || !hostAllowed(target.hostname)) return fail(`bad-target:${target.protocol}://${target.hostname}`);
     return NextResponse.redirect(new URL(rebuildStreamUrl(raw, trackId, providerUrl, title, artist), request.url), 307);
-  } catch {
-    return null;
+  } catch (err) {
+    return fail(`resolve-failed:${err instanceof Error ? err.message : "unknown"}`);
   }
 }
 
