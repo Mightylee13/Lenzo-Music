@@ -78,8 +78,10 @@ async function reResolve(
   title: string | null,
   artist: string | null,
 ): Promise<Response | null> {
-  const fail = (reason: string): Response | null =>
-    NextResponse.json({ error: `A valid allow-listed audio url is required`, rescue: reason }, { status: 403 });
+  const fail = (reason: string): Response | null => {
+    console.error(`[stream] rescue bailed: ${reason}`);
+    return null;
+  };
   if (!providerUrl) return fail("no-provider-url");
   if (isSoundCloudSet(providerUrl)) return fail("soundcloud-set");
   try {
