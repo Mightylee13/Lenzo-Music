@@ -19,7 +19,7 @@ export const maxDuration = 60;
    ============================================================ */
 
 /** Hosts the resolver may produce — no open relay. */
-const ALLOWED_HOSTS = ["api.theresav.eu", "spotidown.app", "googlevideo.com", "soundcloud.cloud", "sndcdn.com"];
+const ALLOWED_HOSTS = ["api.theresav.eu", "spotidown.app", "dlapi.app", "googlevideo.com", "soundcloud.cloud", "sndcdn.com"];
 
 function hostAllowed(hostname: string): boolean {
   return ALLOWED_HOSTS.some((h) => hostname === h || hostname.endsWith(`.${h}`));
