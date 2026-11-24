@@ -197,10 +197,21 @@ export async function searchTracks(query: string, source: SearchSource): Promise
             const found = await engineSearchRaw(q, 24);
             if (found.tracks.length > 0 || found.albums.length > 0) {
               const tracks = found.tracks.map(engineTrackToTrack);
-              for (const t of tracks) noteSuggestion(t.title);
+              // The same recording often surfaces several times (single +
+              // album + compilation appearances) — keep the first, most
+              // relevant catalogue hit per title + primary artist so the
+              // list does not show "Awuke" three times.
+              const seenTrack = new Set<string>();
+              const dedupedTracks = tracks.filter((t) => {
+                const key = `${slug(t.title)}|${slug(t.artist.split(",")[0]?.trim() ?? "")}`;
+                if (seenTrack.has(key)) return false;
+                seenTrack.add(key);
+                return true;
+              });
+              for (const t of dedupedTracks) noteSuggestion(t.title);
               for (const a of found.artists) noteSuggestion(a.name);
               for (const a of found.albums) noteSuggestion(a.name);
-              const grouped = albumsFromTracks(tracks);
+              const grouped = albumsFromTracks(dedupedTracks);
               const native = found.albums.map(engineAlbumToAlbum);
               // The catalogue's native album nodes know the REAL release
               // type and year — fold them over the search-window inference
@@ -222,7 +233,7 @@ export async function searchTracks(query: string, source: SearchSource): Promise
               const albums = mergeAlbums(grouped, native);
               const artists = found.artists.map(engineArtistToArtist);
               console.log(`[search] engine ${Date.now() - engineStart}ms q=${q}`);
-              return { tracks, albums, artists, playlists: [], podcasts: [], total: tracks.length + albums.length + artists.length };
+              return { tracks: dedupedTracks, albums, artists, playlists: [], podcasts: [], total: dedupedTracks.length + albums.length + artists.length };
             }
             // Engine answered but the catalogue genuinely has nothing for
             // this query — give the mirror API one shot before agreeing.
