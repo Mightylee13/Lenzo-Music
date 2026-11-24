@@ -4,11 +4,12 @@ import { chartPlaylistById, defaultChartPlaylists } from "@/lib/api/charts";
 import { curatedGenrePlaylist } from "@/lib/api/curated";
 import { searchAll, searchTracks } from "@/lib/api/music";
 import { albumsFromTracks, normalizeSpotifyTracks } from "@/lib/api/normalizers";
+import { engineAlbumToAlbum, engineSearchRaw } from "@/lib/server/spotifyEngine";
 import { getSessionUser } from "@/lib/auth/session";
 import { getAppSettings } from "@/lib/db/app-settings";
 import { playlistsByOwner } from "@/lib/db/playlists";
 import { CHARTS, PLAYLISTS } from "@/lib/data/demo";
-import type { HomeSectionConfig, Track } from "@/types";
+import type { Album, HomeSectionConfig, Track } from "@/types";
 
 /* ============================================================
    HOME SECTION BUILDER (server-only, shared)
@@ -105,6 +106,34 @@ async function getSessionUserSafe() {
 
 /* ---------- remote builders ---------- */
 
+/** Major artists whose newest drops the New Releases shelf surfaces. */
+const NEW_RELEASE_ARTISTS = [
+  "burna boy", "wizkid", "davido", "asake", "rema", "ayra starr",
+  "tems", "tyla", "odumodublvck", "rugerr", "cassette", "fave",
+];
+
+async function engineNewReleases(): Promise<Album[]> {
+  const now = new Date();
+  const yearsToTry = now.getMonth() === 0 ? [now.getFullYear(), now.getFullYear() - 1] : [now.getFullYear()];
+  for (const year of yearsToTry) {
+    const scans = await Promise.allSettled(
+      NEW_RELEASE_ARTISTS.map((artist) => engineSearchRaw(artist, 24))
+    );
+    const byId = new Map<string, Album>();
+    for (const scan of scans) {
+      if (scan.status !== "fulfilled") continue;
+      for (const a of scan.value.albums) {
+        if (a.year !== year) continue;
+        const mapped = engineAlbumToAlbum(a);
+        if (!byId.has(mapped.id)) byId.set(mapped.id, mapped);
+      }
+    }
+    const list = [...byId.values()];
+    if (list.length) return list;
+  }
+  return [];
+}
+
 async function buildSectionPayload(
   section: HomeSectionConfig,
   recent: Track[],
@@ -117,16 +146,18 @@ async function buildSectionPayload(
       for (const t of recent) counts.set(t.artist, (counts.get(t.artist) ?? 0) + 1);
       const topNames = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([n]) => n);
       if (!topNames.length) {
-        const fallback = await withUpstreamSlot(() => searchTracks(TRENDING_QUERY, "soundcloud")).catch(() => null);
+        const fallback = await withUpstreamSlot(() => searchTracks(TRENDING_QUERY, "spotify")).catch(() => null);
         return {
           id: section.id,
           title: section.title,
           kind: "tracks",
-          tracks: pickShelfTracks(fallback?.tracks, 10),
+          tracks: pickShelfTracks(fallback?.tracks ?? (await withUpstreamSlot(() => searchTracks(TRENDING_QUERY, "soundcloud")).catch(() => null))?.tracks, 10),
         };
       }
+      // Search the real catalogue (engine-first) — SoundCloud results are
+      // covers/remixes that play the wrong song.
       const results = await Promise.allSettled(
-        topNames.map((name) => withUpstreamSlot(() => searchTracks(name, "soundcloud")))
+        topNames.map((name) => withUpstreamSlot(() => searchTracks(name, "spotify")))
       );
       const merged = results.flatMap((r) => (r.status === "fulfilled" && r.value ? r.value.tracks.slice(0, 3) : []));
       return { id: section.id, title: section.title, kind: "tracks", tracks: merged.slice(0, 10) };
@@ -148,6 +179,14 @@ async function buildSectionPayload(
       };
     }
     case "new-releases": {
+      // THE ENGINE — real catalogue "just out": scan major artists'
+      // discographies and keep only current-year releases, newest first.
+      // The old mirror query ("new releases this week") returned whatever
+      // the upstream guessed, which is why the shelf never showed the new.
+      const engineReleases = await withUpstreamSlot(() => engineNewReleases()).catch(() => []);
+      if (engineReleases.length) {
+        return { id: section.id, title: section.title, kind: "albums", albums: engineReleases.slice(0, 14) };
+      }
       const raw = await withUpstreamSlot(() =>
         callUpstream({ endpoint: "search.spotify", params: { query: "new releases this week" } })
       ).catch(() => null);
@@ -183,7 +222,17 @@ async function buildSectionPayload(
       };
     }
     case "trending": {
-      const results = await withUpstreamSlot(() => searchTracks(TRENDING_QUERY, "soundcloud")).catch(() => null);
+      // Real trending = the official Apple "Most Played" chart for Nigeria
+      // (real weekly-updated hits, resolvable tracks). A text query like
+      // "trending songs this week" only ever matched songs literally
+      // named "Trending".
+      const chart = await withUpstreamSlot(() => chartPlaylistById("chart-apple-ng")).catch(() => null);
+      if (chart?.tracks?.length) {
+        return { id: section.id, title: section.title, kind: "tracks", tracks: chart.tracks.slice(0, 20) };
+      }
+      const results =
+        (await withUpstreamSlot(() => searchTracks(TRENDING_QUERY, "spotify")).catch(() => null)) ??
+        (await withUpstreamSlot(() => searchTracks(TRENDING_QUERY, "soundcloud")).catch(() => null));
       return {
         id: section.id,
         title: section.title,
@@ -201,8 +250,10 @@ async function buildSectionPayload(
     return { id: section.id, title: section.title, kind: "playlists", playlists: playlist ? [playlist] : [] };
   }
 
-  // Genre/mood tracks shelf.
-  const results = await withUpstreamSlot(() => searchTracks(`${section.title} songs`, "soundcloud")).catch(() => null);
+  // Genre/mood tracks shelf — real catalogue first, SoundCloud as backup.
+  const results =
+    (await withUpstreamSlot(() => searchTracks(`${section.title} songs`, "spotify")).catch(() => null)) ??
+    (await withUpstreamSlot(() => searchTracks(`${section.title} songs`, "soundcloud")).catch(() => null));
   const tracks = pickShelfTracks(results?.tracks, 10);
   const artists = (results?.artists ?? []).slice(0, 10);
   return {
