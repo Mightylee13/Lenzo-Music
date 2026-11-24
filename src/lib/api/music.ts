@@ -16,6 +16,7 @@ import {
 } from "@/lib/api/normalizers";
 import { probeAudioUrl } from "@/lib/api/probe";
 import { isPrimaryDisabled } from "@/lib/config/api-config";
+import { rememberTrack } from "@/lib/server/trackRegistry";
 import type { Album, ApiStatus, ResolvedAudio, ResolvableSource, SearchResults, SearchSource, Track } from "@/types";
 
 /* ============================================================
@@ -473,6 +474,10 @@ function providerFor(url: string): "spotify-v2" | "ytmp3" | null {
  * the UI surfaces it honestly instead of faking playback.
  */
 export async function resolveTrack(track: Track, force = false): Promise<ResolvedAudio> {
+  // Registry for the stream route: lets /api/music/stream re-resolve by
+  // track id when a signed url expires without any client JS (iOS PWA
+  // control-center resume; see server/trackRegistry.ts).
+  rememberTrack(track);
   const identity = track.id || `${track.artist}-${track.title}`;
   const key = `resolve:${identity}`;
   if (force) invalidate(key);

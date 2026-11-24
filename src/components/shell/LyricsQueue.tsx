@@ -107,10 +107,18 @@ export function LyricsView({ className = "", variant = "panel" }: { className?: 
   }, []);
 
   useEffect(() => {
+    if (activeIndex < 0) return;
     const el = activeRef.current;
+    if (!el || Date.now() < userScrollUntil.current) return;
     const box = container.current;
-    if (el && box && activeIndex >= 0 && Date.now() >= userScrollUntil.current) {
+    const boxScrollable = box ? box.scrollHeight > box.clientHeight + 4 : false;
+    if (box && boxScrollable) {
       box.scrollTo({ top: el.offsetTop - box.clientHeight * 0.35, behavior: "smooth" });
+    } else {
+      // The full /lyrics page scrolls the SHELL (no fixed-height box), so
+      // scroll the page itself to keep the active line in view — without
+      // this the lyrics sat still and users had to scroll manually.
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [activeIndex]);
 

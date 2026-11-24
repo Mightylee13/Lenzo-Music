@@ -50,9 +50,9 @@ export default function LyricsPage() {
 
   return (
     <div className="flex min-h-[calc(100vh-13rem)] flex-col animate-fade-in">
-      {/* Down chevron — the same collapse control as Now Playing; tapping
-          it dives back to the Now Playing view. */}
-      <header className="flex items-center justify-between gap-3">
+      {/* Down chevron — sticky, so it's always reachable no matter how far
+          you've scrolled into the lyrics; tapping dives to Now Playing. */}
+      <header className="sticky top-[env(safe-area-inset-top)] z-20 -mx-4 flex items-center justify-between gap-3 bg-bg/85 px-4 py-2 backdrop-blur-md md:-mx-6 md:px-6">
         <button
           type="button"
           onClick={() => router.push("/now-playing")}

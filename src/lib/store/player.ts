@@ -130,12 +130,12 @@ async function maybePreloadNext(): Promise<void> {
   preloadKey = key;
 
   try {
-    const resolved = await resolveAudio(nextTrack);
+    const resolved = await resolveAudio(nextTrack, false, { prefetch: true });
     preloadEl = new Audio();
     preloadEl.preload = "auto";
     // Through the proxy so the service worker stores the bytes on the
     // device while it preloads — the song is cached before it even plays.
-    preloadEl.src = audioSourceFor(resolved, nextTrack.id);
+    preloadEl.src = audioSourceFor(resolved, nextTrack);
     preloadEl.load();
   } catch {
     preloadKey = null; // unresolvable — let the normal skip path handle it
@@ -154,14 +154,26 @@ function isOffline(): boolean {
 /**
  * The SW stores played songs' bytes on-device under /__audio__/<tid>.
  * Offline we can still play those even though `resolve` is unreachable —
- * point the audio element at the proxy with just the track id and the SW
- * serves the stored file. Returns the stream URL or null.
+ * point the audio element at the proxy and the SW serves the stored file.
+ * The URL also carries the track's PERMANENT provider link (`u`) plus
+ * title/artist: on iPhone the media element can bypass the service
+ * worker, and this route re-resolves server-side from those params when
+ * it receives them without client JS (control-center resume fix).
+ * Returns the stream URL or null.
  */
-async function offlineStreamSource(trackId: string): Promise<string | null> {
+function stableStreamSearch(track: Track): string {
+  const params = new URLSearchParams({ tid: track.id });
+  if (track.url) params.set("u", track.url);
+  if (track.title) params.set("t", track.title);
+  if (track.artist) params.set("a", track.artist);
+  return params.toString();
+}
+
+async function offlineStreamSource(track: Track): Promise<string | null> {
   try {
     if (typeof caches === "undefined") return null;
-    const hit = await caches.match(`/__audio__/${encodeURIComponent(trackId)}`);
-    return hit ? `/api/music/stream?tid=${encodeURIComponent(trackId)}` : null;
+    const hit = await caches.match(`/__audio__/${encodeURIComponent(track.id)}`);
+    return hit ? `/api/music/stream?${stableStreamSearch(track)}` : null;
   } catch {
     return null;
   }
@@ -198,7 +210,7 @@ async function firstPlayableOffset(start: number, dir: 1 | -1): Promise<number |
   if (!queue.length) return null;
   for (let i = 0; i < queue.length; i++) {
     const idx = (start + i * dir + queue.length) % queue.length;
-    if (await offlineStreamSource(queue[idx].id)) return idx;
+    if (await offlineStreamSource(queue[idx])) return idx;
   }
   return null;
 }
@@ -213,9 +225,9 @@ async function firstPlayableOffset(start: number, dir: 1 | -1): Promise<number |
 export async function cacheTrackAudio(track: Track): Promise<void> {
   try {
     if (!track) return;
-    if (await offlineStreamSource(track.id)) return; // already on device
-    const resolved = await resolveAudio(track);
-    const src = audioSourceFor(resolved, track.id);
+    if (await offlineStreamSource(track)) return; // already on device
+    const resolved = await resolveAudio(track, false, { prefetch: true });
+    const src = audioSourceFor(resolved, track);
     if (!src || /^(blob:|data:)/.test(src)) return;
     // The SW intercepts stream requests and persists the full file
     // itself; cancelling our body just frees memory — its own fetch
@@ -227,31 +239,11 @@ export async function cacheTrackAudio(track: Track): Promise<void> {
   }
 }
 
-/* ---------- downloads backfill ---------- */
-
-/** Tracks whose device copy we already secured this session. */
-const backfilled = new Set<string>();
-let backfillRunning = false;
-
-/**
- * After sign-in/bootstrap, quietly cache any downloaded songs that are
- * not yet on this device — one at a time so it never floods the radio.
- */
-export function backfillDownloadCache(tracks: Track[]): void {
-  if (backfillRunning || isOffline() || !tracks.length) return;
-  void (async () => {
-    backfillRunning = true;
-    for (const track of tracks) {
-      if (backfilled.has(track.id)) continue;
-      if (isOffline()) break;
-      backfilled.add(track.id); // even on failure, don't retry in a loop
-      await cacheTrackAudio(track);
-    }
-    backfillRunning = false;
-  })();
-}
-
-export async function resolveAudio(track: Track, force = false): Promise<ResolvedAudio> {
+export async function resolveAudio(
+  track: Track,
+  force = false,
+  opts: { prefetch?: boolean } = {},
+): Promise<ResolvedAudio> {
   const cached = resolvedCache.get(track.id);
   if (cached && !force) return cached;
 
@@ -260,10 +252,19 @@ export async function resolveAudio(track: Track, force = false): Promise<Resolve
   // (prefetch) must reuse that promise, never start a second conversion.
   if (pending && !force) return pending;
 
+  // Background prefetches run on an abortable wire: when the USER starts
+  // (or skips to) a new track, running prefetches are aborted below — the
+  // upstream API serialises requests, so a pending next-track conversion
+  // would otherwise queue the user's own resolution behind it and make
+  // starts feel slow, especially after a long song.
+  const controller = new AbortController();
+  if (opts.prefetch) prefetchControllers.add(controller);
+
   const promise = fetch("/api/music/resolve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ track, force }),
+    signal: controller.signal,
   })
     .then(async (res) => {
       if (!res.ok) {
@@ -274,9 +275,21 @@ export async function resolveAudio(track: Track, force = false): Promise<Resolve
       cacheResolved(track.id, data.audio);
       return data.audio;
     })
-    .finally(() => inflight.delete(track.id));
+    .finally(() => {
+      inflight.delete(track.id);
+      prefetchControllers.delete(controller);
+    });
   inflight.set(track.id, promise);
   return promise;
+}
+
+/** Abortable wires of currently running background prefetches. */
+const prefetchControllers = new Set<AbortController>();
+
+/** Kill any in-flight prefetch so the user's own resolution goes first. */
+function abortPrefetches(): void {
+  for (const controller of prefetchControllers) controller.abort();
+  prefetchControllers.clear();
 }
 
 const prefetching = new Set<string>();
@@ -291,7 +304,7 @@ export async function prefetchTracks(tracks: Track[], count = 2): Promise<void> 
     if (resolvedCache.has(track.id) || prefetching.has(track.id)) continue;
     prefetching.add(track.id);
     try {
-      await resolveAudio(track);
+      await resolveAudio(track, false, { prefetch: true });
     } catch {
       /* not playable — the play path will show it */
     } finally {
@@ -307,16 +320,21 @@ export async function prefetchTracks(tracks: Track[], count = 2): Promise<void> 
  * (signed, expiring) change between plays. Replays are then served
  * from the device — instant, and offline-capable.
  */
-function audioSourceFor(resolved: ResolvedAudio, trackId: string): string {
+function audioSourceFor(resolved: ResolvedAudio, track: Track): string {
   const url = resolved.audioUrl;
   if (!url || /^(blob:|data:)/.test(url)) return url;
   if (url.startsWith("/api/music/stream")) {
-    // The server pre-proxies range-hostile sources — just tag the track id.
+    // The server pre-proxies range-hostile sources — retag the track id
+    // AND the permanent recovery params (u/t/a) so an expired signed url
+    // can be re-resolved server-side with no client JS (iOS PWA resume).
     const tagged = new URL(url, "http://local");
-    tagged.searchParams.set("tid", trackId);
+    tagged.searchParams.set("tid", track.id);
+    if (track.url) tagged.searchParams.set("u", track.url);
+    if (track.title) tagged.searchParams.set("t", track.title);
+    if (track.artist) tagged.searchParams.set("a", track.artist);
     return tagged.pathname + tagged.search;
   }
-  return `/api/music/stream?url=${encodeURIComponent(url)}&tid=${encodeURIComponent(trackId)}`;
+  return `/api/music/stream?${stableStreamSearch(track)}&url=${encodeURIComponent(url)}`;
 }
 
 function loadSource(url: string, autoplay: boolean) {
@@ -406,6 +424,9 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
   const token = ++resolveToken;
   const store = usePlayerStore.getState();
   dropPreload();
+  // The user's pick has top priority on the converter wire — kill any
+  // background prefetch so it can't queue ahead of this resolution.
+  abortPrefetches();
 
   // The new click owns the player immediately: stop and drop the old
   // stream so the old song never keeps playing while the new one loads.
@@ -438,7 +459,7 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
     // long background pause (expired signed CDN links play silence while
     // the frozen PWA can't re-resolve), and replays start instantly.
     let resolved: ResolvedAudio;
-    const cachedLocal = await offlineStreamSource(track.id);
+    const cachedLocal = await offlineStreamSource(track);
     if (cachedLocal) {
       resolved = {
         audioUrl: cachedLocal,
@@ -455,7 +476,7 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
     usePlayerStore.setState({ resolved, lyrics: resolved.lyrics ?? null });
     if (resolved.duration) usePlayerStore.setState({ duration: resolved.duration });
 
-    loadSource(audioSourceFor(resolved, track.id), true);
+    loadSource(audioSourceFor(resolved, track), true);
     // Restoring a pause position (control-center resume after the URL
     // expired): jump back once the new source can seek.
     if (resumeAt > 0 && audio) {
@@ -482,7 +503,7 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
       const nt = usePlayerStore.getState().queue[ni];
       if (!nt) return;
       try {
-        await resolveAudio(nt);
+        await resolveAudio(nt, false, { prefetch: true });
       } catch { /* skip path handles it */ }
     })();
   } catch (err) {
@@ -491,7 +512,7 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
     // Offline: the resolver is unreachable, but songs already played are
     // still stored on the device — play directly from the audio cache.
     if (isOffline()) {
-      const cachedSource = await offlineStreamSource(track.id);
+      const cachedSource = await offlineStreamSource(track);
       if (token !== resolveToken) return;
       if (!cachedSource) {
         // Not saved on this device: hop to the next saved song in the
@@ -525,7 +546,7 @@ async function startTrack(track: Track, queue: Track[], index: number, resumeAt 
         status: "playing",
         isPlaying: true,
       });
-      loadSource(audioSourceFor(cachedResolved, track.id), true);
+      loadSource(audioSourceFor(cachedResolved, track), true);
       updateMediaSession(track, cachedResolved);
       return;
     }
@@ -622,7 +643,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
         try {
           const resolved = await resolveAudio(track, true);
           if (usePlayerStore.getState().current?.id !== track.id) return;
-          loadSource(audioSourceFor(resolved, track.id), usePlayerStore.getState().isPlaying);
+          loadSource(audioSourceFor(resolved, track), usePlayerStore.getState().isPlaying);
           el.currentTime = position;
           const still = usePlayerStore.getState();
           if (still.isPlaying) {

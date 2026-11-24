@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import { resolveTrack } from "@/lib/api/music";
+import { isSoundCloudSet } from "@/lib/api/normalizers";
+import type { Track } from "@/types";
 
 // The stream proxies a full song through this function for as long as the
 // browser keeps downloading it; the default timeout would cut audio mid-
@@ -57,8 +60,68 @@ function sliceStream(
   return body.pipeThrough(transform);
 }
 
+/**
+ * THE iOS PWA CONTROL-CENTER RESCUE.
+ * On iPhone, <audio> requests can bypass the service worker entirely, so
+ * when a signed CDN url expires during a long background pause, the media
+ * element re-requests the stream directly and no page JS is running to
+ * fix it. The client therefore packs the track's PERMANENT provider link
+ * (open.spotify.com/... or youtube.com/... — never signed, never expires)
+ * into every stream request as `u` (+ title/artist for identity
+ * checking). This route rebuilds the track from those params and
+ * re-resolves server-side: zero client JavaScript required.
+ */
+async function reResolve(
+  request: Request,
+  trackId: string | null,
+  providerUrl: string | null,
+  title: string | null,
+  artist: string | null,
+): Promise<Response | null> {
+  if (!providerUrl || isSoundCloudSet(providerUrl)) return null;
+  try {
+    const track: Track = {
+      id: trackId ?? "recovered",
+      title: title ?? "",
+      artist: artist ?? "",
+      url: providerUrl,
+      source: /spotify\.com/.test(providerUrl) ? "spotify" : "youtube",
+      artwork: "",
+      duration: 0,
+    };
+    const audio = await resolveTrack(track, true);
+    if (!audio?.audioUrl) return null;
+    const target = new URL(audio.audioUrl);
+    if (target.protocol !== "https:" || !hostAllowed(target.hostname)) return null;
+    return NextResponse.redirect(new URL(rebuildStreamUrl(audio.audioUrl, trackId, providerUrl, title, artist), request.url), 307);
+  } catch {
+    return null;
+  }
+}
+
+/** Stream URL for a freshly resolved source, keeping the recovery params. */
+function rebuildStreamUrl(
+  audioUrl: string,
+  trackId: string | null,
+  providerUrl: string | null,
+  title: string | null,
+  artist: string | null,
+): string {
+  const params = new URLSearchParams({ url: audioUrl });
+  if (trackId) params.set("tid", trackId);
+  if (providerUrl) params.set("u", providerUrl);
+  if (title) params.set("t", title);
+  if (artist) params.set("a", artist);
+  return `/api/music/stream?${params.toString()}`;
+}
+
 export async function GET(request: Request) {
-  const rawTarget = new URL(request.url).searchParams.get("url");
+  const searchParams = new URL(request.url).searchParams;
+  const trackId = searchParams.get("tid");
+  const providerUrl = searchParams.get("u");
+  const title = searchParams.get("t");
+  const artist = searchParams.get("a");
+  const rawTarget = searchParams.get("url");
   let parsed: URL | null = null;
   if (rawTarget) {
     try {
@@ -68,6 +131,10 @@ export async function GET(request: Request) {
     }
   }
   if (!parsed || parsed.protocol !== "https:" || !hostAllowed(parsed.hostname)) {
+    // Either an iOS media request touched only `tid` (SW bypassed), or the
+    // url param is broken. Re-resolve from the permanent provider link.
+    const recovered = await reResolve(request, trackId, providerUrl, title, artist);
+    if (recovered) return recovered;
     return NextResponse.json({ error: "A valid allow-listed audio url is required" }, { status: 403 });
   }
 
@@ -79,9 +146,14 @@ export async function GET(request: Request) {
       cache: "no-store",
     });
   } catch {
+    const recovered = await reResolve(request, trackId, providerUrl, title, artist);
+    if (recovered) return recovered;
     return NextResponse.json({ error: "Upstream audio unavailable" }, { status: 502 });
   }
   if (!upstream.ok && upstream.status !== 206 || !upstream.body) {
+    // Signed url most likely expired mid-life — recover by provider link.
+    const recovered = await reResolve(request, trackId, providerUrl, title, artist);
+    if (recovered) return recovered;
     return NextResponse.json({ error: "Upstream audio unavailable" }, { status: 502 });
   }
 
