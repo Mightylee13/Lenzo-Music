@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { resolveTrack } from "@/lib/api/music";
 import { isSoundCloudSet } from "@/lib/api/normalizers";
+import { engineYtAudio } from "@/lib/server/spotifyEngine";
 import type { Track } from "@/types";
 
 // The stream proxies a full song through this function for as long as the
@@ -96,14 +97,31 @@ async function reResolve(
     };
     const audio = await resolveTrack(track, true);
     if (!audio?.audioUrl) return fail("resolve-empty");
-    // Unwrap relative proxy paths to the real inner url.
-    const raw = audio.audioUrl.startsWith("/api/music/stream")
-      ? new URL(audio.audioUrl, request.url).searchParams.get("url")
-      : audio.audioUrl;
-    if (!raw) return fail("no-inner-url");
-    const target = new URL(raw);
+    // Unwrap our own proxy paths. The engine path carries `yt` (no signed
+    // url behind it) — re-key the rescue params onto it and redirect; the
+    // streaming instance resolves the googlevideo url itself, same-IP.
+    if (audio.audioUrl.startsWith("/api/music/stream")) {
+      const inner = new URL(audio.audioUrl, request.url);
+      const yt = inner.searchParams.get("yt");
+      if (yt && YT_ID_RE.test(yt)) {
+        const rebuilt = new URL("/api/music/stream", request.url);
+        rebuilt.searchParams.set("yt", yt);
+        if (trackId) rebuilt.searchParams.set("tid", trackId);
+        if (providerUrl) rebuilt.searchParams.set("u", providerUrl);
+        if (title) rebuilt.searchParams.set("t", title);
+        if (artist) rebuilt.searchParams.set("a", artist);
+        return NextResponse.redirect(rebuilt, 307);
+      }
+      const innerUrl = inner.searchParams.get("url");
+      if (!innerUrl) return fail("no-inner-url");
+      const target = new URL(innerUrl);
+      if (target.protocol !== "https:" || !hostAllowed(target.hostname)) return fail(`bad-target:${target.protocol}://${target.hostname}`);
+      return NextResponse.redirect(new URL(rebuildStreamUrl(innerUrl, trackId, providerUrl, title, artist), request.url), 307);
+    }
+    // A direct (non-proxied) audio url — redirect to it through the proxy.
+    const target = new URL(audio.audioUrl);
     if (target.protocol !== "https:" || !hostAllowed(target.hostname)) return fail(`bad-target:${target.protocol}://${target.hostname}`);
-    return NextResponse.redirect(new URL(rebuildStreamUrl(raw, trackId, providerUrl, title, artist), request.url), 307);
+    return NextResponse.redirect(new URL(rebuildStreamUrl(audio.audioUrl, trackId, providerUrl, title, artist), request.url), 307);
   } catch (err) {
     return fail(`resolve-failed:${err instanceof Error ? err.message : "unknown"}`);
   }
@@ -125,6 +143,9 @@ function rebuildStreamUrl(
   return `/api/music/stream?${params.toString()}`;
 }
 
+/** The engine's playback hand-off is a video id, never a googlevideo url. */
+const YT_ID_RE = /^[A-Za-z0-9_-]{8,16}$/;
+
 export async function GET(request: Request) {
   const searchParams = new URL(request.url).searchParams;
   const trackId = searchParams.get("tid");
@@ -133,7 +154,26 @@ export async function GET(request: Request) {
   const artist = searchParams.get("a");
   const rawTarget = searchParams.get("url");
   let parsed: URL | null = null;
-  if (rawTarget) {
+
+  const ytId = searchParams.get("yt");
+  if (ytId) {
+    if (!YT_ID_RE.test(ytId)) {
+      return NextResponse.json({ error: "Invalid engine playback token" }, { status: 403 });
+    }
+    // SAME-IP RESOLUTION: the youtubei player call happens HERE, in the
+    // streaming instance, so the googlevideo url it returns is bound to
+    // the same egress IP that pipes the bytes (cross-IP fetches are
+    // rejected by Google — verified live). Cached per instance for 25min.
+    const audio = (await engineYtAudio(ytId)) ?? (await engineYtAudio(ytId, true));
+    if (!audio) {
+      // Re-resolve through the track registry / provider link instead.
+      const recovered = await reResolve(request, trackId, providerUrl, title, artist);
+      if (recovered) return recovered;
+      return NextResponse.json({ error: "No clear audio available for this track" }, { status: 502 });
+    }
+    parsed = new URL(audio.url);
+    if (parsed.protocol !== "https:") parsed = null;
+  } else if (rawTarget) {
     try {
       parsed = new URL(rawTarget);
     } catch {

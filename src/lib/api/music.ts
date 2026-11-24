@@ -17,6 +17,14 @@ import {
 import { probeAudioUrl } from "@/lib/api/probe";
 import { isPrimaryDisabled } from "@/lib/config/api-config";
 import { rememberTrack } from "@/lib/server/trackRegistry";
+import {
+  engineAlbumToAlbum,
+  engineArtistToArtist,
+  engineResolve,
+  engineSearchRaw,
+  engineTrackToTrack,
+  type EngineResolution,
+} from "@/lib/server/spotifyEngine";
 import type { Album, ApiStatus, ResolvedAudio, ResolvableSource, SearchResults, SearchSource, Track } from "@/types";
 
 /* ============================================================
@@ -179,6 +187,50 @@ export async function searchTracks(query: string, source: SearchSource): Promise
       }
 
       if (source === "spotify") {
+        // THE ENGINE FIRST — the anonymous web-player catalogue with real
+        // album names, release YEARS and TYPES (album/EP/single) plus real
+        // artist cards, at web-player latency (~0.5-1.2s warm).
+        if (!isPrimaryDisabled()) {
+          try {
+            const engineStart = Date.now();
+            const found = await engineSearchRaw(q, 24);
+            if (found.tracks.length > 0 || found.albums.length > 0) {
+              const tracks = found.tracks.map(engineTrackToTrack);
+              for (const t of tracks) noteSuggestion(t.title);
+              for (const a of found.artists) noteSuggestion(a.name);
+              for (const a of found.albums) noteSuggestion(a.name);
+              const grouped = albumsFromTracks(tracks);
+              const native = found.albums.map(engineAlbumToAlbum);
+              // The catalogue's native album nodes know the REAL release
+              // type and year — fold them over the search-window inference
+              // so cards stop being mislabeled ("everything is an EP").
+              const nativeById = new Map(native.map((a) => [a.id, a]));
+              for (const g of grouped) {
+                const n = nativeById.get(g.id);
+                if (!n) continue;
+                if (n.type) g.type = n.type;
+                if (n.year) {
+                  g.year = n.year;
+                  g.releaseDate = String(n.year);
+                }
+                for (const t of g.tracks ?? []) {
+                  if (n.type === "album" || n.type === "single" || n.type === "ep") t.albumType = n.type;
+                  t.releaseDate = n.releaseDate;
+                }
+              }
+              const albums = mergeAlbums(grouped, native);
+              const artists = found.artists.map(engineArtistToArtist);
+              console.log(`[search] engine ${Date.now() - engineStart}ms q=${q}`);
+              return { tracks, albums, artists, playlists: [], podcasts: [], total: tracks.length + albums.length + artists.length };
+            }
+            // Engine answered but the catalogue genuinely has nothing for
+            // this query — give the mirror API one shot before agreeing.
+          } catch (engineErr) {
+            console.error(
+              `[search] engine did not answer q=${q}: ${engineErr instanceof Error ? engineErr.message : engineErr} — mirror API takes over`,
+            );
+          }
+        }
         const raw = await callUpstream({ endpoint: "search.spotify", params: { query: q } });
         const tracks = normalizeSpotifyTracks(raw);
         // The upstream sends no releaseDate/albumType — fill them from
@@ -549,20 +601,67 @@ async function hedgedResolve(
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* THE ENGINE — primary playback path                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How long the engine (Spotify anonymous search + judged YouTube pick)
+ * gets as the SOLE resolver before the mirror-API attempts are even
+ * started. The engine wins in ~2s cold / ~0.6s warm (measured), so the
+ * mirror API only does work when the engine is genuinely down or stuck.
+ */
+const ENGINE_WINDOW_MS = 10000;
+
+/** Reject after `ms` so one hung engine fetch cannot hold the whole resolve. */
+function withTimeout<T>(p: Promise<T>, ms: number, label = "engine window exceeded"): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(label)), ms).unref?.()),
+  ]);
+}
+
+function engineStreamUrl(res: EngineResolution, track: Track): string {
+  // No signed url is ever handed to the client — just the video id. The
+  // stream route re-resolves the (IP-locked) googlevideo url inside the
+  // streaming instance itself, so every request always works and never
+  // expires the way signed CDN links do.
+  const params = new URLSearchParams({ yt: res.videoId, tid: track.id });
+  if (track.title) params.set("t", track.title);
+  if (track.artist) params.set("a", track.artist);
+  return `/api/music/stream?${params.toString()}`;
+}
+
+async function resolveViaEngine(track: Track, force = false): Promise<ResolvedAudio> {
+  const res = await engineResolve({ title: track.title, artist: track.artist }, force);
+  if (!res) throw new Error("engine found no full-length audio");
+  const resolved: ResolvedAudio = {
+    audioUrl: engineStreamUrl(res, track),
+    title: res.youtubeTitle,
+    quality: "YouTube audio",
+    provider: "ytmp3",
+    duration: res.durationSec ? Math.round(res.durationSec) : undefined,
+  };
+  // The engine's judge already enforces title coverage; this double-checks
+  // the handed-back YouTube title against the listed track before it plays.
+  if (!identityMatches(track, resolved)) throw new Error("engine audio identity mismatch");
+  return resolved;
+}
+
 /**
  * Resolve a track into a directly streamable audio URL.
  *
- * Resolution order (per project requirements — Spotify + ytmp3 only,
- * full tracks, never 30s previews):
- *   1. Spotify v2 converter for the track's Spotify link
- *      (v1 converter as an internal retry).
- *   2. Spotify search fallback when the track carries no Spotify
- *      link (e.g. it came from a SoundCloud search).
- *   3. ytmp3 for a direct YouTube link.
- *   4. YouTube search fallback — search for the track, then convert.
+ * Resolution order (per project requirements — engine primary, mirror API
+ * only when the engine is down; full tracks, never 30s previews):
+ *   0. THE ENGINE — Spotify anonymous search canonicalises the song, a
+ *      judged YouTube pick proves full-length audio, playback streams
+ *      from the same instance via /api/music/stream?yt=<videoId>.
+ *   1..n Mirror-API attempts (hedged) — only reached when the engine
+ *      failed, was too slow, or returned nothing usable.
+ *   n+1. The local backup engine (yt-dlp), last resort.
  *
- * Throws a real error when nothing upstream can serve the track;
- * the UI surfaces it honestly instead of faking playback.
+ * Throws a real error when nothing can serve the track; the UI surfaces
+ * it honestly instead of faking playback.
  */
 export async function resolveTrack(track: Track, force = false): Promise<ResolvedAudio> {
   // Registry for the stream route: lets /api/music/stream re-resolve by
@@ -583,6 +682,24 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
         400,
         "resolve",
       );
+    }
+
+    // 0. THE ENGINE, as the sole runner: it wins in ~2s when healthy and
+    // the mirror API does no work at all. Only a real engine failure or
+    // the 10s window opens the fallback line below.
+    if (track.title) {
+      try {
+        const engineStart = Date.now();
+        const engineAudio = await withTimeout(resolveViaEngine(track, force), ENGINE_WINDOW_MS);
+        console.log(`[resolve] engine ${Date.now() - engineStart}ms track=${track.id} ${track.title}`);
+        return engineAudio;
+      } catch (engineErr) {
+        console.error(
+          `[resolve] engine did not serve ${track.id} after ${ENGINE_WINDOW_MS}ms window: ${
+            engineErr instanceof Error ? engineErr.message : engineErr
+          } — mirror API takes over`,
+        );
+      }
     }
 
     const sourceUrl = track.url && isAllowedProviderUrl(track.url) ? track.url : undefined;
