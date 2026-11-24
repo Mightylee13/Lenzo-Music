@@ -578,8 +578,11 @@ export async function engineYtAudio(videoId: string, force = false): Promise<{ u
       const pJson = (await pRes.json()) as Unknown;
       const status = String(asRecord(pJson?.playabilityStatus)?.status);
       if (status === "LOGIN_REQUIRED") {
+        // One LOGIN_REQUIRED is enough — the block is IP-wide (verified
+        // live: all clients answer identically on datacenter IPs), so
+        // don't burn 4×2.5s probing the other clients.
         botBlocked = true;
-        continue;
+        break;
       }
       const streaming = asRecord(pJson?.streamingData);
       const picked = pickAudio([...(Array.isArray(streaming?.adaptiveFormats) ? streaming.adaptiveFormats : []), ...(Array.isArray(streaming?.formats) ? streaming.formats : [])]);
