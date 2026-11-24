@@ -103,8 +103,15 @@ function Expanded({
           type="button"
           aria-label={pathname === "/now-playing" ? "Back to home" : "Collapse player"}
           onClick={() => {
-            if (pathname === "/now-playing") router.back();
-            else usePlayerStore.getState().setExpanded(false);
+            // On /now-playing, "down" must LEAVE the player — router.back()
+            // bounced users back to wherever they came from (often the
+            // lyrics page), creating a lyrics ⇄ now-playing loop.
+            if (pathname === "/now-playing") {
+              usePlayerStore.getState().setExpanded(false);
+              router.push("/");
+            } else {
+              usePlayerStore.getState().setExpanded(false);
+            }
           }}
           className="grid size-10 place-items-center rounded-full text-ink hover:bg-white/8"
         >

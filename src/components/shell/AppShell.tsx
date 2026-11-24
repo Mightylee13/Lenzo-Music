@@ -37,7 +37,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         <div className="relative flex min-w-0 flex-1 flex-col">
           {/* Scroll container */}
           <main className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-            <div className="mx-auto w-full max-w-[1400px] px-4 pb-40 pt-4 md:px-6 md:pb-8 md:pt-6">{children}</div>
+            {/* Top padding includes the iPhone status-bar (clock) area in
+                standalone PWA mode — otherwise controls hide under it. */}
+            <div className="mx-auto w-full max-w-[1400px] px-4 pb-40 pt-[calc(1rem+env(safe-area-inset-top))] md:px-6 md:pb-8 md:pt-6">{children}</div>
           </main>
 
           {/* Desktop right-panel toggle floats at the panel edge */}

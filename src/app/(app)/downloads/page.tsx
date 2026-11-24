@@ -11,9 +11,10 @@ import { useUi } from "@/lib/store/ui";
 import { formatDuration } from "@/lib/client/fetcher";
 
 /* ============================================================
-   DOWNLOADS — saved-for-offline tracks with storage estimate.
-   Downloads bookmark tracks (metadata + instant re-resolve);
-   the audio itself is re-streamed, keeping this compliant.
+   DOWNLOADS — tracks stored for offline playback.
+   Downloading resolves the audio and stores its bytes in the
+   device service-worker cache (audio-cache-v1); a background
+   backfill stores everything after sign-in.
    ============================================================ */
 
 export default function DownloadsPage() {
@@ -71,7 +72,7 @@ export default function DownloadsPage() {
             Remove all downloads
           </button>
           <p className="text-[11px] text-faint">
-            Audio is streamed through the server on demand; downloads re-resolve with priority
+            Audio is stored on this device when you download — saved songs play even offline.
             {tracks[0] ? ` (${formatDuration(totalSeconds)} total)` : ""}.
           </p>
         </>

@@ -203,6 +203,54 @@ async function firstPlayableOffset(start: number, dir: 1 | -1): Promise<number |
   return null;
 }
 
+/**
+ * DOWNLOADS REALLY DOWNLOAD.
+ * `toggleDownload` used to only bookmark the track — offline, "saved"
+ * songs still had to stream. This pulls the full audio through the
+ * proxy so the service worker stores the bytes on the device under
+ * /__audio__/<tid>. Best-effort: errors are swallowed.
+ */
+export async function cacheTrackAudio(track: Track): Promise<void> {
+  try {
+    if (!track) return;
+    if (await offlineStreamSource(track.id)) return; // already on device
+    const resolved = await resolveAudio(track);
+    const src = audioSourceFor(resolved, track.id);
+    if (!src || /^(blob:|data:)/.test(src)) return;
+    // The SW intercepts stream requests and persists the full file
+    // itself; cancelling our body just frees memory — its own fetch
+    // (storeFull) keeps running independently.
+    const res = await fetch(src, { cache: "no-store" });
+    void res.body?.cancel().catch(() => undefined);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/* ---------- downloads backfill ---------- */
+
+/** Tracks whose device copy we already secured this session. */
+const backfilled = new Set<string>();
+let backfillRunning = false;
+
+/**
+ * After sign-in/bootstrap, quietly cache any downloaded songs that are
+ * not yet on this device — one at a time so it never floods the radio.
+ */
+export function backfillDownloadCache(tracks: Track[]): void {
+  if (backfillRunning || isOffline() || !tracks.length) return;
+  void (async () => {
+    backfillRunning = true;
+    for (const track of tracks) {
+      if (backfilled.has(track.id)) continue;
+      if (isOffline()) break;
+      backfilled.add(track.id); // even on failure, don't retry in a loop
+      await cacheTrackAudio(track);
+    }
+    backfillRunning = false;
+  })();
+}
+
 export async function resolveAudio(track: Track, force = false): Promise<ResolvedAudio> {
   const cached = resolvedCache.get(track.id);
   if (cached && !force) return cached;
@@ -294,13 +342,13 @@ function setMediaPlaybackState(state: "playing" | "paused") {
 }
 
 /**
- * Wire the OS control-center actions once. Next/prev/seek NEED JavaScript,
- * so they are registered here. Play/pause are deliberately NOT registered:
- * without a handler, iOS/Android resume the audio element NATIVELY — that
- * works even when a standalone PWA's JS is frozen in the background, and
- * avoids the user-activation problems of lock-screen taps. Our element
- * play/pause/playing listeners keep the store and mediaSession state in
- * sync either way.
+ * Wire the OS control-center actions. Next/prev/seek need JavaScript;
+ * play/pause are registered EXPLICITLY because on iOS standalone PWAs the
+ * "native resume with no handler" path silently fails once WebKit
+ * suspends the page in the background — the control-center play button
+ * would do nothing until the app was reopened. A registered handler makes
+ * iOS wake the page to deliver the action, and our element listeners keep
+ * the store in sync either way.
  */
 function installMediaSessionHandlers() {
   if (typeof window === "undefined" || !("mediaSession" in navigator)) return;
@@ -308,6 +356,16 @@ function installMediaSessionHandlers() {
   const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
     ["previoustrack", () => st().prev()],
     ["nexttrack", () => st().next()],
+    ["play", () => {
+      if (!audio) return;
+      // If the page was suspended, the element may need its current
+      // source re-kicked; play() on a healthy element just resumes.
+      void audio.play().catch(() => {
+        const track = usePlayerStore.getState().current;
+        if (track) void startTrack(track, usePlayerStore.getState().queue, usePlayerStore.getState().index, audio?.currentTime ?? 0);
+      });
+    }],
+    ["pause", () => audio?.pause()],
     ["seekto", (details) => {
       const t = (details as { seekTime?: number }).seekTime;
       if (typeof t === "number") st().seek(t);
@@ -322,12 +380,6 @@ function installMediaSessionHandlers() {
       /* action unsupported on this platform */
     }
   }
-  // Explicitly CLEAR play/pause so a previously installed handler (e.g.
-  // from an older app version still cached) never shadows native control.
-  try {
-    navigator.mediaSession.setActionHandler("play", null);
-    navigator.mediaSession.setActionHandler("pause", null);
-  } catch { /* unsupported */ }
 }
 
 function updateMediaSession(track: Track, resolved: ResolvedAudio | null) {

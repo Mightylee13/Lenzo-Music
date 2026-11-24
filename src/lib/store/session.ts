@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { apiGet, apiSend } from "@/lib/client/fetcher";
+import { backfillDownloadCache, cacheTrackAudio } from "@/lib/store/player";
 import type { Album, Artist, FeatureFlag, PublicUser, Track } from "@/types";
 
 /* ============================================================
@@ -137,6 +138,10 @@ export const useSession = create<SessionState>((set, get) => ({  ready: false,
     } finally {
       set({ ready: true });
     }
+    // Quietly store the audio bytes of downloaded songs that are not yet
+    // on this device (one at a time, background, online only — the helper
+    // checks online state itself).
+    backfillDownloadCache(get().library.downloads);
   },
 
   login: async (identifier, password) => {
@@ -315,6 +320,9 @@ export const useSession = create<SessionState>((set, get) => ({  ready: false,
     }));
     try {
       await apiSend("/api/library", "PATCH", { op: add ? "add-download" : "remove-download", track });
+      // Actually store the audio bytes on this device (this used to only
+      // bookmark the track — offline, "saved" songs still had to stream).
+      if (add) void cacheTrackAudio(track);
     } catch (err) {
       set((s) => ({
         library: {
