@@ -111,7 +111,7 @@ function RemoteSection({ id, title }: { id: string; title: string }) {
 function HomeSection({ payload }: { payload: SectionPayload }) {
   if (payload.kind === "tracks" && payload.tracks?.length) {
     return (
-      <RenderSection title={payload.title}>
+      <RenderSection title={payload.title} href={`/section/${payload.id}`}>
         {payload.tracks.map((track) => (
           <Tile key={track.id}>
             <MediaCard
@@ -148,7 +148,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
   }
   if (payload.kind === "albums" && payload.albums?.length) {
     return (
-      <RenderSection title={payload.title} href="/explore">
+      <RenderSection title={payload.title} href={`/section/${payload.id}`}>
         {payload.albums.map((al) => (
           <Tile key={al.id}>
             <MediaCard
@@ -167,7 +167,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
   }
   if (payload.kind === "artists" && payload.artists?.length) {
     return (
-      <RenderSection title={payload.title} href="/discover">
+      <RenderSection title={payload.title} href={`/section/${payload.id}`}>
         {payload.artists.map((ar) => (
           <Tile key={ar.id}>
             <MediaCard
@@ -187,7 +187,7 @@ function HomeSection({ payload }: { payload: SectionPayload }) {
   }
   if (payload.kind === "charts" && payload.tracks?.length) {
     return (
-      <RenderSection title={payload.title} href="/discover">
+      <RenderSection title={payload.title} href={`/section/${payload.id}`}>
         {payload.tracks.slice(0, 14).map((track, i, arr) => (
           <Tile key={track.id}>
             <MediaCard

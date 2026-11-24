@@ -64,6 +64,8 @@ interface EngineState {
    * instead of burning time on the player. 0 = player believed fine.
    */
   playerBlockedUntil: number;
+  /** 0 = trusted instance proxies believed fine; otherwise cooldown after all failed. */
+  instanceProxyDownUntil: number;
 }
 
 const STATE_KEY = "__lenzo_spotify_engine__" as const;
@@ -79,6 +81,7 @@ function state(): EngineState {
       resolveCache: new Map(),
       streamCache: new Map(),
       playerBlockedUntil: 0,
+      instanceProxyDownUntil: 0,
     };
     g[STATE_KEY] = s;
   }
@@ -543,6 +546,63 @@ function markPlayerBlocked(): void {
 }
 
 /**
+ * Trusted public instance proxies — the "find every means possible" leg.
+ * These servers fetch YouTube audio with THEIR IPs and re-proxy the bytes,
+ * so Google's datacenter IP-lock never bites even when the direct player
+ * API is bot-blocked on our own IP. They are used ONLY for video ids the
+ * engine's judge already picked, so identity protection is unchanged.
+ */
+const INSTANCE_TARGETS = [
+  "https://inv.nadeko.net",
+  "https://invidious.nerdvpn.de",
+  "https://yewtu.be",
+  "https://invidious.f5.si",
+  "https://iv.melmac.space",
+];
+const INSTANCE_DOWN_TTL = 10 * 60 * 1000;
+
+async function engineYtViaInstanceProxy(videoId: string): Promise<YtAudio | null> {
+  const s = state();
+  if (s.instanceProxyDownUntil > Date.now()) return null;
+  try {
+    const probes = await Promise.allSettled(
+      INSTANCE_TARGETS.map(async (inst): Promise<YtAudio> => {
+        const r = await tf(`${inst}/api/v1/videos/${videoId}`, { headers: { accept: "application/json" } }, 6000);
+        if (!r.ok) throw new Error(String(r.status));
+        const j = (await r.json()) as Unknown;
+        const formats = Array.isArray(j?.adaptiveFormats) ? (j.adaptiveFormats as Unknown[]) : [];
+        const audios = formats
+          .filter((f) => String((f as { type?: string }).type ?? "").startsWith("audio/") && (f as { itag?: number }).itag)
+          .sort((a, b) => (Number((b as { bitrate?: number }).bitrate) || 0) - (Number((a as { bitrate?: number }).bitrate) || 0));
+        if (!audios.length) throw new Error("no audio formats");
+        const best = audios[0] as { itag: number; type?: string; bitrate?: number };
+        // Always go through the instance's local proxy endpoint — raw
+        // googlevideo urls they return are locked to THEIR IP anyway.
+        return {
+          url: `${inst}/latest_version?id=${videoId}&itag=${best.itag}&local=true`,
+          bitrate: best.bitrate ?? null,
+          mimeType: (best.type ?? "").split(";")[0] || null,
+          contentLength: null,
+          client: `invidious:${new URL(inst).hostname}`,
+          lengthSeconds: Number((j as { lengthSeconds?: number }).lengthSeconds) || null,
+        } satisfies YtAudio;
+      }),
+    );
+    const ok = probes.find((p): p is PromiseFulfilledResult<YtAudio> => p.status === "fulfilled" && "value" in p);
+    if (ok) {
+      s.instanceProxyDownUntil = 0;
+      s.playerBlockedUntil = 0; // instance path works; keep engine-attempt alive
+      console.log(`[engine] instance proxy serve via ${ok.value.client}`);
+      return ok.value;
+    }
+  } catch {
+    /* fallthrough */
+  }
+  s.instanceProxyDownUntil = Date.now() + INSTANCE_DOWN_TTL;
+  return null;
+}
+
+/**
  * Resolve a videoId into a DIRECT googlevideo audio URL.
  * Same-instance only — see the IP rule at the top of this file.
  */
@@ -597,8 +657,14 @@ export async function engineYtAudio(videoId: string, force = false): Promise<{ u
   }
   if (!last?.url) {
     if (botBlocked) markPlayerBlocked();
-    if (hit) s.streamCache.delete(videoId); // stale cached url stopped working
-    return null;
+    // Direct playback is blocked on this IP — the trusted instance proxies
+    // fetch with THEIR IPs and re-proxy the bytes, so try them next.
+    const viaInstance = await engineYtViaInstanceProxy(videoId);
+    if (viaInstance) last = viaInstance;
+    if (!last?.url) {
+      if (hit) s.streamCache.delete(videoId); // stale cached url stopped working
+      return null;
+    }
   }
   evictIfNeeded(s.streamCache);
   s.streamCache.set(videoId, { ts: Date.now(), url: last.url, mimeType: last.mimeType, contentLength: last.contentLength, lengthSeconds: last.lengthSeconds });

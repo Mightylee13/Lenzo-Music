@@ -704,12 +704,11 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
       );
     }
 
-    // 0. THE ENGINE, as the sole runner WHEN its direct playback path is
-    // usable. Inside Google-bot-blocked networks (verified: every Vercel
-    // lambda IP) engineYtAudio flips enginePlayerBlocked() — then this
-    // attempt is skipped instantly and the judged hand-off below feeds the
-    // mirror API instead, so no resolve ever pays a 10s dead window.
-    if (track.title && !enginePlayerBlocked()) {
+    // 0. THE ENGINE, as the sole runner. When Google bot-blocks this IP
+    // the direct googlevideo path dies, but engineYtAudio falls back to
+    // trusted public instance proxies (engine-validated video id, THEIR
+    // IP) — so the engine attempt stays alive even on datacenter hosts.
+    if (track.title) {
       try {
         const engineStart = Date.now();
         const engineAudio = await withTimeout(resolveViaEngine(track, force), ENGINE_WINDOW_MS);

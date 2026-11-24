@@ -5,10 +5,12 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SearchIcon, Play, X } from "lucide-react";
 import Artwork from "@/components/ui/Artwork";
+import MediaCard from "@/components/ui/MediaCard";
+import Section from "@/components/ui/Section";
 import { EmptyState, ErrorState, TrackListSkeleton } from "@/components/ui/skeletons";
 import { useApi, useDebounced } from "@/lib/client/hooks";
 import { albumTypeLabel } from "@/lib/labels";
-import { usePlayerStore } from "@/lib/store/player";
+import { usePlayerStore, prefetchTracks } from "@/lib/store/player";
 import type { SearchResults, Track } from "@/types";
 
 /* ============================================================
@@ -382,9 +384,11 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
   const q = query.trim();
 
   // Spotify-style subtitles: what a thing IS first (Song/Album/EP/Single/
-  // Artist/Playlist), "New · " in front when it dropped within ~4 weeks.
+  // Artist/Playlist), "New · " in front when it dropped recently. The
+  // engine often gives a year-only date ("2026") — count that as new too.
   const isNew = (iso?: string) => {
     if (!iso) return false;
+    if (/^\d{4}$/.test(iso)) return Number(iso) === new Date().getFullYear();
     const then = Date.parse(iso);
     return Number.isFinite(then) && Date.now() - then < 28 * 864e5;
   };
@@ -462,69 +466,146 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
   const best = rows[0]?.score ?? 0;
   const visible = best >= 90 ? rows.filter((r) => r.score > 10) : rows;
 
-  return (
-    <div className="flex flex-col">
-      <h2 className="mb-1 px-1 text-lg font-bold text-ink">Results</h2>
-      <div className="flex flex-col">
-        {visible.map((row) => {
-          const isCurrent = row.kind === "song" && current?.id === row.track?.id;
-          const isCurrentPlaying = isCurrent && usePlayerStore.getState().isPlaying;
-          const inner = (
-            <>
-              <Artwork
-                src={row.artwork}
-                seed={row.kind === "song" ? row.track!.id : row.id}
-                label={row.title}
-                alt=""
-                className={`size-12 shrink-0 object-cover ${row.round ? "rounded-full" : "rounded-lg"}`}
-                loading="lazy"
-              />
-              <span className="min-w-0 flex-1">
-                <span className={`block truncate text-sm font-bold ${isCurrent ? "text-cyan" : "text-ink"}`}>{row.title}</span>
-                <span className="block truncate text-xs text-muted">{row.subtitle}</span>
-              </span>
-              {row.kind === "song" && (
-                <span className="grid size-9 shrink-0 place-items-center rounded-full bg-white/8 text-ink">
-                  {isCurrent && isCurrentPlaying ? <EqualizerIcon /> : <Play className="size-4 fill-current" />}
-                </span>
-              )}
-            </>
-          );
+  // Spotify-style arrangement: one hero "Top result", a Songs list, then
+  // swipeable Albums / Artists / Playlists shelves — not one flat soup.
+  const currentIsPlaying = usePlayerStore((s) => s.isPlaying);
+  const top = visible.find((r) => r.score >= 90) ?? null;
+  const songRows = visible.filter((r) => r.kind === "song" && r.id !== top?.id);
+  const albumRows = visible.filter((r) => r.kind === "album");
+  const artistRows = visible.filter((r) => r.kind === "artist");
+  const playlistRows = visible.filter((r) => r.kind === "playlist");
 
-          if (row.kind === "song" && row.track) {
-            return (
-              <button
-                key={row.id}
-                type="button"
-                onClick={() => (isCurrent ? toggle() : playTrack(row.track!, tracks))}
-                className="flex items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-white/4"
-              >
-                {inner}
-              </button>
-            );
-          }
-          const external = /^https?:\/\//.test(row.href ?? "");
-          if (external) {
-            return (
-              <a
-                key={row.id}
-                href={row.href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-white/4"
-              >
-                {inner}
-              </a>
-            );
-          }
-          return (
-            <Link key={row.id} href={row.href ?? "#"} className="flex items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-white/4">
-              {inner}
-            </Link>
-          );
-        })}
-      </div>
+  return (
+    <div className="flex flex-col gap-7">
+      {top && <TopResultCard row={top} isPlaying={currentIsPlaying} />}
+
+      {songRows.length > 0 && (
+        <section>
+          <h2 className="mb-1 px-1 text-lg font-bold text-ink">Songs</h2>
+          <div className="flex flex-col">
+            {songRows.slice(0, 8).map((row) => {
+              const isCurrent = current?.id === row.track?.id;
+              return (
+                <button
+                  key={row.id}
+                  type="button"
+                  onClick={() => (isCurrent ? toggle() : playTrack(row.track!, tracks))}
+                  onPointerEnter={row.track ? () => prefetchTracks([row.track!], 1) : undefined}
+                  onTouchStart={row.track ? () => prefetchTracks([row.track!], 1) : undefined}
+                  className="flex items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-white/4"
+                >
+                  <Artwork src={row.artwork} seed={row.id} label={row.title} alt="" className="size-12 shrink-0 rounded-lg object-cover" loading="lazy" />
+                  <span className="min-w-0 flex-1">
+                    <span className={`block truncate text-sm font-bold ${isCurrent ? "text-cyan" : "text-ink"}`}>{row.title}</span>
+                    <span className="block truncate text-xs text-muted">{row.subtitle}</span>
+                  </span>
+                  <span className="grid size-9 shrink-0 place-items-center rounded-full bg-white/8 text-ink">
+                    {isCurrent && currentIsPlaying ? <EqualizerIcon /> : <Play className="size-4 fill-current" />}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {albumRows.length > 0 && (
+        <Section title="Albums & EPs">
+          {albumRows.map((row) => (
+            <MediaCard
+              key={row.id}
+              artwork={row.artwork}
+              seed={row.id}
+              label={row.title}
+              title={row.title}
+              subtitle={row.subtitle}
+              href={row.href && /^https?:\/\//.test(row.href) ? undefined : row.href}
+              className="w-[150px] shrink-0 snap-start md:w-[176px]"
+            />
+          ))}
+        </Section>
+      )}
+      {artistRows.length > 0 && (
+        <Section title="Artists">
+          {artistRows.map((row) => (
+            <MediaCard
+              key={row.id}
+              artwork={row.artwork}
+              seed={row.id}
+              label={row.title}
+              title={row.title}
+              subtitle="Artist"
+              round
+              href={row.href}
+              className="w-[150px] shrink-0 snap-start md:w-[176px]"
+            />
+          ))}
+        </Section>
+      )}
+      {playlistRows.length > 0 && (
+        <Section title="Playlists">
+          {playlistRows.map((row) => (
+            <MediaCard
+              key={row.id}
+              artwork={row.artwork}
+              seed={row.id}
+              label={row.title}
+              title={row.title}
+              subtitle={row.subtitle}
+              href={row.href}
+              className="w-[150px] shrink-0 snap-start md:w-[176px]"
+            />
+          ))}
+        </Section>
+      )}
     </div>
+  );
+}
+
+/** The single highest-scoring result, presented Spotify-style. */
+function TopResultCard({ row, isPlaying }: { row: { kind: string; id: string; title: string; subtitle: string; artwork: string; round?: boolean; track?: Track }; isPlaying: boolean }) {
+  const playTrack = usePlayerStore((s) => s.playTrack);
+  const toggle = usePlayerStore((s) => s.toggle);
+  const isCurrentSong = row.kind === "song" && !!row.track;
+
+  const body = (
+    <>
+      <Artwork
+        src={row.artwork}
+        seed={row.id}
+        label={row.title}
+        alt=""
+        className={`size-24 shrink-0 object-cover shadow-lg shadow-black/40 md:size-28 ${row.round ? "rounded-full" : "rounded-xl"}`}
+        loading="lazy"
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[10px] font-bold uppercase tracking-[0.2em] text-muted">Top result</span>
+        <span className="mt-1 block truncate text-xl font-extrabold tracking-tight text-ink md:text-2xl">{row.title}</span>
+        <span className="mt-0.5 block truncate text-xs text-muted">{row.subtitle}</span>
+      </span>
+      {isCurrentSong && (
+        <span className="grid size-11 shrink-0 place-items-center rounded-full bg-electric text-white shadow-lg">
+          <Play className="size-5 fill-current" />
+        </span>
+      )}
+    </>
+  );
+
+  if (isCurrentSong && row.track) {
+    return (
+      <button
+        type="button"
+        onClick={() => (usePlayerStore.getState().current?.id === row.track!.id ? toggle() : playTrack(row.track!, [row.track!]))}
+        className="flex w-full items-center gap-4 rounded-card bg-card p-4 text-left transition-all hover:bg-elevated"
+      >
+        {body}
+      </button>
+    );
+  }
+  return (
+    <Link href={row.kind === "artist" ? `/artists/${row.id.replace(/^ar-/, "")}` : `/albums/${row.id.replace(/^al-/, "")}`} className="flex w-full items-center gap-4 rounded-card bg-card p-4 transition-all hover:bg-elevated">
+      {body}
+    </Link>
   );
 }
 

@@ -203,6 +203,9 @@ export default function TrackList({
                   <span className={`block truncate text-sm font-semibold ${isCurrent ? "text-cyan" : "text-ink"}`}>
                     {track.title}
                     {track.explicit && <span className="ml-1.5 rounded bg-white/10 px-1 text-[10px] font-bold text-muted">E</span>}
+                    {track.releaseDate?.startsWith(String(new Date().getFullYear())) && (
+                      <span className="ml-1.5 rounded bg-cyan/15 px-1 text-[10px] font-extrabold uppercase tracking-wide text-cyan">New</span>
+                    )}
                   </span>
                   <span className="block truncate text-xs text-muted">
                     {track.artistId ? (

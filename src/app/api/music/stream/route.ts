@@ -156,6 +156,7 @@ export async function GET(request: Request) {
   let parsed: URL | null = null;
 
   const ytId = searchParams.get("yt");
+  let engineTrusted = false;
   if (ytId) {
     if (!YT_ID_RE.test(ytId)) {
       return NextResponse.json({ error: "Invalid engine playback token" }, { status: 403 });
@@ -164,6 +165,9 @@ export async function GET(request: Request) {
     // streaming instance, so the googlevideo url it returns is bound to
     // the same egress IP that pipes the bytes (cross-IP fetches are
     // rejected by Google — verified live). Cached per instance for 25min.
+    // When Google bot-blocks our IP, engineYtAudio falls back to trusted
+    // public instance proxies (engine-validated video id, their IP) —
+    // those URLs are engine-trusted and skip the static allow-list.
     const audio = (await engineYtAudio(ytId)) ?? (await engineYtAudio(ytId, true));
     if (!audio) {
       // Re-resolve through the track registry / provider link instead.
@@ -173,6 +177,7 @@ export async function GET(request: Request) {
     }
     parsed = new URL(audio.url);
     if (parsed.protocol !== "https:") parsed = null;
+    engineTrusted = parsed !== null;
   } else if (rawTarget) {
     try {
       parsed = new URL(rawTarget);
@@ -180,7 +185,7 @@ export async function GET(request: Request) {
       parsed = null;
     }
   }
-  if (!parsed || parsed.protocol !== "https:" || !hostAllowed(parsed.hostname)) {
+  if (!parsed || parsed.protocol !== "https:" || (!hostAllowed(parsed.hostname) && !engineTrusted)) {
     // Either an iOS media request touched only `tid` (SW bypassed), or the
     // url param is broken. Re-resolve from the permanent provider link.
     const recovered = await reResolve(request, trackId, providerUrl, title, artist);
