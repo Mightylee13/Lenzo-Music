@@ -365,8 +365,12 @@ async function resolve(want, force = false) {
   };
 
   const judged = [];
+  const diag = { spotify: null, searches: [], candidates: 0, botBlocked: false, instanceDownUntil: null };
   for (const want2 of await candidatesOf()) {
-    const hits = await ytSearch([want2.title, want2.artist, "official audio"].filter(Boolean).join(" ")).catch(() => []);
+    const q = [want2.title, want2.artist, "official audio"].filter(Boolean).join(" ");
+    let hits = [];
+    try { hits = await ytSearch(q); diag.searches.push({ q, hits: hits.length }); }
+    catch (e) { diag.searches.push({ q, error: String(e && e.message || e).slice(0, 120) }); }
     for (const hit2 of hits) judged.push({ hit: hit2, score: scoreCandidate(hit2, want2) });
   }
   judged.sort((a, b) => b.score - a.score);
@@ -465,7 +469,12 @@ const server = http.createServer(async (req, res) => {
       if (!body?.title) return json(res, 400, { error: "title is required" });
       const t0 = Date.now();
       const pick = await resolve(body, body.force === true);
-      if (!pick || !pick.videoId) return json(res, 404, { error: "no full-length audio found" });
+      if (!pick || !pick.videoId) {
+        diag.candidates = judged.length;
+        diag.botBlocked = S.playerBlockedUntil > Date.now();
+        diag.instanceDownUntil = S.instanceProxyDownUntil > Date.now() ? S.instanceProxyDownUntil : null;
+        return json(res, 404, { error: "no full-length audio found", diag });
+      }
       // identity guard: the judge winner must still match the LISTED song
       if (!identityMatches(body.title, pick.title)) return json(res, 404, { error: "identity mismatch" });
       return json(res, 200, {
