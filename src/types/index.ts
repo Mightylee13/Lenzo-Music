@@ -142,6 +142,9 @@ export interface ResolvedAudio {
   /** True when the URL is a short preview rather than the full track. */
   isPreview?: boolean;
   expiresAt?: number;
+  /** True when audioUrl points at the engine host itself (stable-IP
+      direct streaming) — played as-is, not re-proxied. */
+  engineHost?: boolean;
 }
 
 /* ---------- Playback ---------- */

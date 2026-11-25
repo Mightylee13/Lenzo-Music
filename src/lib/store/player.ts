@@ -347,6 +347,10 @@ export async function prefetchTracks(tracks: Track[], count = 2): Promise<void> 
 function audioSourceFor(resolved: ResolvedAudio, track: Track): string {
   const url = resolved.audioUrl;
   if (!url || /^(blob:|data:)/.test(url)) return url;
+  // Engine-host audio (Railway, stable IP) is range-friendly, CORS-open
+  // and cache-headered — play it directly. Re-proxying it through the
+  // app would only add a hop and break the host allow-list.
+  if (resolved.engineHost && /^https?:\/\//.test(url)) return url;
   if (url.startsWith("/api/music/stream")) {
     // The server pre-proxies range-hostile sources — retag the track id
     // AND the permanent recovery params (u/t/a) so an expired signed url

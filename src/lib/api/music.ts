@@ -632,7 +632,20 @@ function withTimeout<T>(p: Promise<T>, ms: number, label = "engine window exceed
   ]);
 }
 
+const REMOTE_ENGINE = (process.env.ENGINE_URL ?? "").replace(/\/+$/, "");
+const REMOTE_ENGINE_TOKEN = process.env.ENGINE_TOKEN ?? "";
+
 function engineStreamUrl(res: EngineResolution, track: Track): string {
+  // With a standalone engine host (Railway — stable IP) the googlevideo
+  // url the engine fetched is locked to THAT host's IP: only the engine
+  // itself can pipe the bytes. Hand the client the engine's stream
+  // endpoint directly in that setup; same-instance semantics stay true.
+  if (REMOTE_ENGINE) {
+    const params = new URLSearchParams({ tid: track.id });
+    if (track.title) params.set("t", track.title);
+    if (track.artist) params.set("a", track.artist);
+    return `${REMOTE_ENGINE}/stream/${res.videoId}?${params.toString()}`;
+  }
   // No signed url is ever handed to the client — just the video id. The
   // stream route re-resolves the (IP-locked) googlevideo url inside the
   // streaming instance itself, so every request always works and never
@@ -644,6 +657,37 @@ function engineStreamUrl(res: EngineResolution, track: Track): string {
 }
 
 async function resolveViaEngine(track: Track, force = false): Promise<ResolvedAudio> {
+  // Standalone engine host (Railway, stable IP) first — direct googlevideo
+  // playback works there, which is the whole point of running one. Its
+  // response is identity-guarded exactly like a local engine answer.
+  if (REMOTE_ENGINE) {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (REMOTE_ENGINE_TOKEN) headers["x-engine-token"] = REMOTE_ENGINE_TOKEN;
+    const remote = await withTimeout(
+      (async () => {
+        const r = await fetch(`${REMOTE_ENGINE}/resolve`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ title: track.title, artist: track.artist, force }),
+          cache: "no-store",
+        });
+        if (!r.ok) throw new Error(`engine host ${r.status}`);
+        return (await r.json()) as { videoId: string; title: string; durationSec: number | null };
+      })(),
+      ATTEMPT_TIMEOUT_MS,
+      "engine host timed out",
+    );
+    const resolved: ResolvedAudio = {
+      audioUrl: engineStreamUrl({ videoId: remote.videoId, youtubeTitle: remote.title, watchUrl: `https://www.youtube.com/watch?v=${remote.videoId}`, durationSec: remote.durationSec }, track),
+      title: remote.title,
+      quality: "YouTube audio",
+      provider: "ytmp3",
+      duration: remote.durationSec ? Math.round(remote.durationSec) : undefined,
+      engineHost: true,
+    };
+    if (!identityMatches(track, resolved)) throw new Error("engine audio identity mismatch");
+    return resolved;
+  }
   const res = await engineResolve({ title: track.title, artist: track.artist }, force, { prove: true });
   if (!res) throw new Error("engine found no full-length audio");
   const resolved: ResolvedAudio = {
