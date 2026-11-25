@@ -49,7 +49,7 @@ const S = {
 const SEARCH_TTL_OK = 10 * 60 * 1000, SEARCH_TTL_FAIL = 60 * 1000;
 const RESOLVE_TTL_OK = 30 * 60 * 1000;
 const STREAM_TTL = 25 * 60 * 1000;
-const PLAYER_BLOCK_TTL = 30 * 60 * 1000;
+const PLAYER_BLOCK_TTL = 2 * 60 * 1000; // short cooldown — a stale 30min block made every resolve fail even after the block cleared (seen live on Railway)
 const INSTANCE_DOWN_TTL = 10 * 60 * 1000;
 const INSTANCE_TARGETS = ["https://inv.nadeko.net", "https://invidious.nerdvpn.de", "https://yewtu.be", "https://invidious.f5.si", "https://iv.melmac.space"];
 
@@ -375,17 +375,24 @@ async function resolve(want, force = false) {
     for (const hit2 of hits) judged.push({ hit: hit2, score: scoreCandidate(hit2, want2) });
   }
   judged.sort((a, b) => b.score - a.score);
-  for (const { hit: video, score } of judged) {
-    if (score < 0.4) break;
-    const audio = await ytAudio(video.videoId, force);
-    if (audio?.url) {
-      const pick = { videoId: video.videoId, title: video.titleTxt, durationSec: audio.lengthSeconds, score };
-      evict(S.resolveCache);
-      S.resolveCache.set(key, { ts: Date.now(), pick });
-      return pick;
+  const tryList = async (ignoreBlock) => {
+    for (const { hit: video, score } of judged) {
+      if (score < 0.4) break;
+      // ignoreBlock: one retry pass that ignores the bot-block flag — a
+      // stale flagged state must not kill the whole engine for the TTL.
+      const audio = await ytAudio(video.videoId, ignoreBlock ? true : force);
+      if (audio?.url) {
+        const pick = { videoId: video.videoId, title: video.titleTxt, durationSec: audio.lengthSeconds, score };
+        evict(S.resolveCache);
+        S.resolveCache.set(key, { ts: Date.now(), pick });
+        return pick;
+      }
     }
-  }
-  return null; // not "no match" vs "unprovable" distinction kept simple;
+    return null;
+  };
+  const pick = (await tryList(false)) ?? (S.playerBlockedUntil > Date.now() ? await tryList(true) : null);
+  if (pick) { S.playerBlockedUntil = 0; diag.botBlocked = false; }
+  return pick; // not "no match" vs "unprovable" distinction kept simple;
                // callers retry via force when audio dies mid-stream
 }
 
@@ -477,7 +484,7 @@ const server = http.createServer(async (req, res) => {
         diag.candidates = judged.length;
         diag.botBlocked = S.playerBlockedUntil > Date.now();
         diag.instanceDownUntil = S.instanceProxyDownUntil > Date.now() ? S.instanceProxyDownUntil : null;
-        return json(res, 404, { error: "no full-length audio found", diag });
+        return json(res, 404, { error: "no full-length audio found", diag: lastDiag });
       }
       // identity guard: the judge winner must still match the LISTED song
       if (!identityMatches(body.title, pick.title)) return json(res, 404, { error: "identity mismatch" });
