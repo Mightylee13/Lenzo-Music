@@ -42,6 +42,7 @@ const S = {
   discoveredHash: null,
   playerBlockedUntil: 0,
   instanceProxyDownUntil: 0,
+  mirrorDownUntil: 0,
   searchCache: new Map(),
   resolveCache: new Map(),
   streamCache: new Map(),
@@ -52,6 +53,9 @@ const STREAM_TTL = 25 * 60 * 1000;
 const PLAYER_BLOCK_TTL = 2 * 60 * 1000; // short cooldown — a stale 30min block made every resolve fail even after the block cleared (seen live on Railway)
 const INSTANCE_DOWN_TTL = 10 * 60 * 1000;
 const INSTANCE_TARGETS = ["https://inv.nadeko.net", "https://invidious.nerdvpn.de", "https://yewtu.be", "https://invidious.f5.si", "https://iv.melmac.space"];
+const MIRROR_DOWN_TTL = 5 * 60 * 1000;
+const MIRROR_BASE = (process.env.MIRROR_BASE_URL || "https://api.theresav.eu").replace(/\/+$/, "");
+const MIRROR_KEY = process.env.MIRROR_API_KEY || "Lenzorah"; // env override on Railway; fallback = app's mirror key
 
 function slug(t) {
   return (t || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -284,6 +288,34 @@ async function ytViaInstanceProxy(videoId) {
   S.instanceProxyDownUntil = Date.now() + INSTANCE_DOWN_TTL;
   return null;
 }
+
+/**
+ * Final fallback leg: the MP3 converter mirror. The mirror converts a
+ * YouTube URL server-side, so its mp3 is NOT IP-locked and works from
+ * anywhere — this keeps the engine productive even while YouTube
+ * bot-blocks OR refreshes a googlevideo url mid-stream.
+ */
+async function mirrorAudio(videoId) {
+  if (!MIRROR_KEY) return null;
+  if (S.mirrorDownUntil > Date.now()) return null;
+  try {
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const r = await tf(`${MIRROR_BASE}/api/download/ytmp3?url=${encodeURIComponent(url)}`, { headers: { "x-apikey": MIRROR_KEY, accept: "application/json" } }, 25000);
+    const j = await r.json();
+    const dl = j?.download_url || j?.downloadUrl;
+    if (!dl) return null;
+    return {
+      url: dl,
+      mimeType: "audio/mpeg",
+      contentLength: null,
+      lengthSeconds: Number(j?.duration_sec) || null,
+      client: "mirror:ytmp3",
+    };
+  } catch {
+    S.mirrorDownUntil = Date.now() + MIRROR_DOWN_TTL;
+    return null;
+  }
+}
 async function ytAudio(videoId, force = false) {
   if (!/^[A-Za-z0-9_-]{8,16}$/.test(videoId)) return null;
   const hit = S.streamCache.get(videoId);
@@ -325,6 +357,13 @@ async function ytAudio(videoId, force = false) {
     }
     const viaInstance = await ytViaInstanceProxy(videoId);
     if (viaInstance) last = viaInstance;
+    if (!last?.url) {
+      const viaMirror = await mirrorAudio(videoId);
+      if (viaMirror) {
+        console.log("[engine] mirror fallback serves", videoId);
+        last = viaMirror;
+      }
+    }
     if (!last?.url) {
       if (hit) S.streamCache.delete(videoId);
       return null;
