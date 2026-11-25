@@ -336,6 +336,7 @@ async function ytAudio(videoId, force = false) {
 }
 
 /* ---------- full resolution for a track ---------- */
+let lastDiag = null; // attached to /resolve 404s for hop-level debugging
 async function resolve(want, force = false) {
   const title = (want.title || "").trim();
   const artist = (want.artist || "").trim();
@@ -365,7 +366,7 @@ async function resolve(want, force = false) {
   };
 
   const judged = [];
-  const diag = { spotify: null, searches: [], candidates: 0, botBlocked: false, instanceDownUntil: null };
+  const diag = (lastDiag = { spotify: null, searches: [], candidates: 0, botBlocked: false, instanceDownUntil: null });
   for (const want2 of await candidatesOf()) {
     const q = [want2.title, want2.artist, "official audio"].filter(Boolean).join(" ");
     let hits = [];
