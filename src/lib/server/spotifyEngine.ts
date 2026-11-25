@@ -609,17 +609,19 @@ async function engineYtViaInstanceProxy(videoId: string): Promise<YtAudio | null
 export async function engineYtAudio(videoId: string, force = false): Promise<{ url: string; mimeType: string | null; contentLength: number | null; lengthSeconds: number | null } | null> {
   if (!/^[A-Za-z0-9_-]{8,16}$/.test(videoId)) return null;
   const s = state();
-  // A freshly detected bot-block short-circuits every further player call
-  // on this instance — proof loops must not re-run all 4 blocked clients
-  // per candidate.
-  if (!force && s.playerBlockedUntil > Date.now()) return null;
   const hit = s.streamCache.get(videoId);
   if (hit && !force && Date.now() - hit.ts < STREAM_TTL) {
     return { url: hit.url, mimeType: hit.mimeType, contentLength: hit.contentLength, lengthSeconds: hit.lengthSeconds };
   }
+  // A freshly detected bot-block only short-circuits the DIRECT player
+  // calls on this instance — the trusted instance proxies below run with
+  // THEIR IPs and must still be tried, otherwise one LOGIN_REQUIRED reply
+  // would kill all playback for 30 minutes even though the proxy leg is
+  // perfectly healthy (verified live on prod).
+  const directBlocked = !force && s.playerBlockedUntil > Date.now();
   let last: YtAudio | null = null;
   let botBlocked = false;
-  for (const client of YT_CLIENTS) {
+  if (!directBlocked) for (const client of YT_CLIENTS) {
     try {
       const pRes = await tf(
         "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
