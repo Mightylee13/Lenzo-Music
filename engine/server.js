@@ -442,16 +442,19 @@ function readBody(req) {
     req.on("error", reject);
   });
 }
-function authorized(req) {
+function authorized(req, url) {
   if (!TOKEN) return true;
-  return req.headers["x-engine-token"] === TOKEN;
+  if (req.headers["x-engine-token"] === TOKEN) return true;
+  // <audio> elements cannot set custom headers — allow the token in the
+  // query string (k=) for stream requests fetched by the player.
+  return url.searchParams.get("k") === TOKEN;
 }
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
   const path = url.pathname;
   try {
-    if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
+    if (!authorized(req, url)) return json(res, 401, { error: "unauthorized" });
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "access-control-allow-origin": "*",

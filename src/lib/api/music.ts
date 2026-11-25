@@ -646,6 +646,8 @@ function engineStreamUrl(res: EngineResolution, track: Track): string {
   // endpoint directly in that setup; same-instance semantics stay true.
   if (REMOTE_ENGINE) {
     const params = new URLSearchParams({ tid: track.id });
+    // <audio> cannot send headers — carry the token in the query string.
+    if (REMOTE_ENGINE_TOKEN) params.set("k", REMOTE_ENGINE_TOKEN);
     if (track.title) params.set("t", track.title);
     if (track.artist) params.set("a", track.artist);
     return `${REMOTE_ENGINE}/stream/${res.videoId}?${params.toString()}`;
