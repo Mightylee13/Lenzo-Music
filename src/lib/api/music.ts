@@ -20,7 +20,6 @@ import { rememberTrack } from "@/lib/server/trackRegistry";
 import {
   engineAlbumToAlbum,
   engineArtistToArtist,
-  enginePlayerBlocked,
   engineResolve,
   engineSearchRaw,
   engineTrackToTrack,
@@ -625,14 +624,6 @@ async function hedgedResolve(
 /* THE ENGINE — primary playback path                                  */
 /* ------------------------------------------------------------------ */
 
-/**
- * How long the engine (Spotify anonymous search + judged YouTube pick)
- * gets as the SOLE resolver before the mirror-API attempts are even
- * started. The engine wins in ~2s cold / ~0.6s warm (measured), so the
- * mirror API only does work when the engine is genuinely down or stuck.
- */
-const ENGINE_WINDOW_MS = 6000;
-
 /** Reject after `ms` so one hung engine fetch cannot hold the whole resolve. */
 function withTimeout<T>(p: Promise<T>, ms: number, label = "engine window exceeded"): Promise<T> {
   return Promise.race([
@@ -708,25 +699,18 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
     // the direct googlevideo path dies, but engineYtAudio falls back to
     // trusted public instance proxies (engine-validated video id, THEIR
     // IP) — so the engine attempt stays alive even on datacenter hosts.
+    const attempts: Array<{ label: string; run: () => Promise<ResolvedAudio> }> = [];
     if (track.title) {
-      try {
-        const engineStart = Date.now();
-        const engineAudio = await withTimeout(resolveViaEngine(track, force), ENGINE_WINDOW_MS);
-        console.log(`[resolve] engine ${Date.now() - engineStart}ms track=${track.id} ${track.title}`);
-        return engineAudio;
-      } catch (engineErr) {
-        console.error(
-          `[resolve] engine did not serve ${track.id}: ${
-            engineErr instanceof Error ? engineErr.message : engineErr
-          }${enginePlayerBlocked() ? ` (player bot-blocked — direct hand-off until it re-checks)` : ""} — mirror API takes over`,
-        );
-      }
+      // The engine runs in the same hedge race as the mirrors (head start
+      // 0) instead of owning a solo 6s window: when it is healthy it still
+      // answers first (~1-2s judge), and when it is bot-blocked its fast
+      // "no audio" verdict no longer delays the mirror attempts.
+      attempts.push({ label: "engine", run: () => resolveViaEngine(track, force) });
     }
 
     const sourceUrl = track.url && isAllowedProviderUrl(track.url) ? track.url : undefined;
     const provider = sourceUrl ? providerFor(sourceUrl) : null;
 
-    const attempts: Array<{ label: string; run: () => Promise<ResolvedAudio> }> = [];
     if (provider === "soundcloud") {
       // Direct SoundCloud conversion first (~2-5s when its CDN serves),
       // then the judged YouTube path (search+judge is ours; conversion is
