@@ -23,7 +23,11 @@ import {
   engineResolve,
   engineSearchRaw,
   engineTrackToTrack,
+  type EngineAlbum,
+  type EngineArtist,
   type EngineResolution,
+  type EngineSearchOutcome,
+  type EngineTrack,
 } from "@/lib/server/spotifyEngine";
 import type { Album, ApiStatus, ResolvedAudio, ResolvableSource, SearchResults, SearchSource, Track } from "@/types";
 
@@ -164,6 +168,79 @@ function relevance(text: string, q: string): number {
 /* Search                                                              */
 /* ------------------------------------------------------------------ */
 
+/** Shared post-processing for engine search payloads (remote or in-lambda). */
+function buildEngineSearchResults(found: EngineSearchOutcome, label: string, sinceMs: number, q: string): SearchResults {
+  const tracks = found.tracks.map(engineTrackToTrack);
+  // The same recording often surfaces several times (single +
+  // album + compilation appearances) — keep the first, most
+  // relevant catalogue hit per title + primary artist so the
+  // list does not show "Awuke" three times.
+  const seenTrack = new Set<string>();
+  const dedupedTracks = tracks.filter((t) => {
+    const key = `${slug(t.title)}|${slug(t.artist.split(",")[0]?.trim() ?? "")}`;
+    if (seenTrack.has(key)) return false;
+    seenTrack.add(key);
+    return true;
+  });
+  for (const t of dedupedTracks) noteSuggestion(t.title);
+  for (const a of found.artists) noteSuggestion(a.name);
+  for (const a of found.albums) noteSuggestion(a.name);
+  const grouped = albumsFromTracks(dedupedTracks);
+  const native = found.albums.map(engineAlbumToAlbum);
+  // The catalogue's native album nodes know the REAL release
+  // type and year — fold them over the search-window inference
+  // so cards stop being mislabeled ("everything is an EP").
+  const nativeById = new Map(native.map((a) => [a.id, a]));
+  for (const g of grouped) {
+    const n = nativeById.get(g.id);
+    if (!n) continue;
+    if (n.type) g.type = n.type;
+    if (n.year) {
+      g.year = n.year;
+      g.releaseDate = String(n.year);
+    }
+    for (const t of g.tracks ?? []) {
+      if (n.type === "album" || n.type === "single" || n.type === "ep") t.albumType = n.type;
+      t.releaseDate = n.releaseDate;
+    }
+  }
+  const albums = mergeAlbums(grouped, native);
+  const artists = found.artists.map(engineArtistToArtist);
+  console.log(`[search] ${label} ${Date.now() - sinceMs}ms q=${q}`);
+  return { tracks: dedupedTracks, albums, artists, playlists: [], podcasts: [], total: dedupedTracks.length + albums.length + artists.length };
+}
+
+/** True when the payload has anything usable (otherwise the caller falls through). */
+function engineFoundSomething(found: EngineSearchOutcome): boolean {
+  return found.tracks.length > 0 || found.albums.length > 0;
+}
+
+export async function searchSpotifyViaEngine(q: string): Promise<SearchResults | null> {
+  // REMOTE engine host first (warm, ~1-2s) — the in-lambda engine cold
+  // boot (TOTP + hash discovery, ~20s measured) is the slow fallback.
+  if (REMOTE_ENGINE) {
+    try {
+      const t0 = Date.now();
+      const found = await remoteEngineSearch(q, 24);
+      if (engineFoundSomething(found)) return buildEngineSearchResults(found, "remote-engine", t0, q);
+    } catch (err) {
+      console.error(`[search] remote engine failed q=${q}: ${err instanceof Error ? err.message : err} — in-lambda engine next`);
+    }
+  }
+  if (!isPrimaryDisabled()) {
+    try {
+      const t0 = Date.now();
+      const found = await engineSearchRaw(q, 24);
+      if (engineFoundSomething(found)) return buildEngineSearchResults(found, "engine", t0, q);
+    } catch (engineErr) {
+      console.error(
+        `[search] engine did not answer q=${q}: ${engineErr instanceof Error ? engineErr.message : engineErr} — mirror API takes over`,
+      );
+    }
+  }
+  return null;
+}
+
 export async function searchTracks(query: string, source: SearchSource): Promise<SearchResults> {
   const q = query.trim();
   if (!q) return { tracks: [], artists: [], albums: [], playlists: [], podcasts: [], total: 0 };
@@ -187,61 +264,10 @@ export async function searchTracks(query: string, source: SearchSource): Promise
       }
 
       if (source === "spotify") {
-        // THE ENGINE FIRST — the anonymous web-player catalogue with real
-        // album names, release YEARS and TYPES (album/EP/single) plus real
-        // artist cards, at web-player latency (~0.5-1.2s warm).
-        if (!isPrimaryDisabled()) {
-          try {
-            const engineStart = Date.now();
-            const found = await engineSearchRaw(q, 24);
-            if (found.tracks.length > 0 || found.albums.length > 0) {
-              const tracks = found.tracks.map(engineTrackToTrack);
-              // The same recording often surfaces several times (single +
-              // album + compilation appearances) — keep the first, most
-              // relevant catalogue hit per title + primary artist so the
-              // list does not show "Awuke" three times.
-              const seenTrack = new Set<string>();
-              const dedupedTracks = tracks.filter((t) => {
-                const key = `${slug(t.title)}|${slug(t.artist.split(",")[0]?.trim() ?? "")}`;
-                if (seenTrack.has(key)) return false;
-                seenTrack.add(key);
-                return true;
-              });
-              for (const t of dedupedTracks) noteSuggestion(t.title);
-              for (const a of found.artists) noteSuggestion(a.name);
-              for (const a of found.albums) noteSuggestion(a.name);
-              const grouped = albumsFromTracks(dedupedTracks);
-              const native = found.albums.map(engineAlbumToAlbum);
-              // The catalogue's native album nodes know the REAL release
-              // type and year — fold them over the search-window inference
-              // so cards stop being mislabeled ("everything is an EP").
-              const nativeById = new Map(native.map((a) => [a.id, a]));
-              for (const g of grouped) {
-                const n = nativeById.get(g.id);
-                if (!n) continue;
-                if (n.type) g.type = n.type;
-                if (n.year) {
-                  g.year = n.year;
-                  g.releaseDate = String(n.year);
-                }
-                for (const t of g.tracks ?? []) {
-                  if (n.type === "album" || n.type === "single" || n.type === "ep") t.albumType = n.type;
-                  t.releaseDate = n.releaseDate;
-                }
-              }
-              const albums = mergeAlbums(grouped, native);
-              const artists = found.artists.map(engineArtistToArtist);
-              console.log(`[search] engine ${Date.now() - engineStart}ms q=${q}`);
-              return { tracks: dedupedTracks, albums, artists, playlists: [], podcasts: [], total: dedupedTracks.length + albums.length + artists.length };
-            }
-            // Engine answered but the catalogue genuinely has nothing for
-            // this query — give the mirror API one shot before agreeing.
-          } catch (engineErr) {
-            console.error(
-              `[search] engine did not answer q=${q}: ${engineErr instanceof Error ? engineErr.message : engineErr} — mirror API takes over`,
-            );
-          }
-        }
+        // THE ENGINE FIRST — remote Railway host when configured (warm,
+        // ~1-2s), then the in-lambda engine, then the mirror API.
+        const viaEngine = await searchSpotifyViaEngine(q);
+        if (viaEngine) return viaEngine;
         const raw = await callUpstream({ endpoint: "search.spotify", params: { query: q } });
         const tracks = normalizeSpotifyTracks(raw);
         // The upstream sends no releaseDate/albumType — fill them from
@@ -638,6 +664,68 @@ function withTimeout<T>(p: Promise<T>, ms: number, label = "engine window exceed
 
 const REMOTE_ENGINE = (process.env.ENGINE_URL ?? "").replace(/\/+$/, "");
 const REMOTE_ENGINE_TOKEN = process.env.ENGINE_TOKEN ?? "";
+
+/**
+ * Search through the REMOTE engine host (Railway) when configured.
+ * The in-lambda engine must bootstrap a whole anonymous Spotify session
+ * (TOTP + client token + hash discovery = several MB of JS on cold start,
+ * ~20s measured) per cold instance; the standalone host stays warm, so its
+ * /search answers in ~1-2s. Returns the same shape as engineSearchRaw.
+ */
+async function remoteEngineSearch(query: string, limit: number): Promise<EngineSearchOutcome> {
+  const url = `${REMOTE_ENGINE}/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+  const r = await fetch(url, {
+    headers: REMOTE_ENGINE_TOKEN ? { "x-engine-token": REMOTE_ENGINE_TOKEN } : undefined,
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!r.ok) throw new Error(`engine search HTTP ${r.status}`);
+  const j = (await r.json()) as { tracks?: Record<string, unknown>[]; albums?: Record<string, unknown>[]; artists?: Record<string, unknown>[] };
+  const tracks: EngineTrack[] = (j.tracks ?? []).map((t) => {
+    const id = String(t.id ?? "");
+    const rawType = typeof t.albumType === "string" ? t.albumType.toLowerCase() : null;
+    const rawYear = Number(t.year);
+    return {
+      id,
+      title: String(t.title ?? ""),
+      artist: String(t.artist ?? ""),
+      album: (t.album as string) ?? null,
+      durationMs: Number(t.durationMs) || 0,
+      explicit: !!t.explicit,
+      thumb: (t.thumb as string) ?? null,
+      url: (t.url as string) || (id ? `https://open.spotify.com/track/${id}` : ""),
+      albumType: rawType === "album" || rawType === "single" || rawType === "ep" ? rawType : null,
+      year: rawYear > 1900 ? rawYear : null,
+    } satisfies EngineTrack;
+  }).filter((t) => t.id && t.title).slice(0, limit);
+  const albums: EngineAlbum[] = (j.albums ?? []).map((a) => {
+    const artists = Array.isArray(a.artists) ? a.artists : [];
+    const mainArtist = String((artists[0] as Record<string, unknown>)?.name ?? "");
+    const uri = String((artists[0] as Record<string, unknown>)?.uri ?? "");
+    const rawType = typeof a.type === "string" ? a.type.toLowerCase() : null;
+    const rawYear = Number(a.year);
+    return {
+      id: String(a.id ?? ""),
+      name: String(a.name ?? ""),
+      type: rawType === "album" || rawType === "single" || rawType === "ep" || rawType === "compilation" ? rawType : null,
+      year: rawYear > 1900 ? rawYear : null,
+      image: (a.image as string) ?? null,
+      mainArtist,
+      artistId: `ar_${slug(mainArtist)}`,
+      url: `https://open.spotify.com/album/${String(a.id ?? "")}`,
+    } satisfies EngineAlbum;
+  }).filter((a) => a.id && a.name).slice(0, limit);
+  const artists: EngineArtist[] = (j.artists ?? []).map((a) => {
+    const id = String(a.id ?? "");
+    return {
+      id,
+      name: String(a.name ?? ""),
+      verified: !!a.verified,
+      image: (a.image as string) ?? null,
+      url: `https://open.spotify.com/artist/${id}`,
+    } satisfies EngineArtist;
+  }).filter((a) => a.id && a.name).slice(0, limit);
+  return { ok: true, tracks, albums, artists };
+}
 
 function engineStreamUrl(res: EngineResolution, track: Track): string {
   // With a standalone engine host (Railway — stable IP) the googlevideo
