@@ -624,11 +624,15 @@ async function hedgedResolve(
 /* THE ENGINE — primary playback path                                  */
 /* ------------------------------------------------------------------ */
 
-/** Reject after `ms` so one hung engine fetch cannot hold the whole resolve. */
+/** Reject after `ms` so one hung engine fetch cannot hold the whole resolve.
+ *  The timer is deliberately NOT unref'd: an unref'd timer does not keep a
+ *  frozen serverless lambda alive, so the rejection (and cleanup of the hung
+ *  attempt) can be postponed for minutes — seen live as
+ *  "path youtube-judged failed after 299897ms". */
 function withTimeout<T>(p: Promise<T>, ms: number, label = "engine window exceeded"): Promise<T> {
   return Promise.race([
     p,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(label)), ms).unref?.()),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(label)), ms)),
   ]);
 }
 
