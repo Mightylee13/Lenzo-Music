@@ -520,9 +520,6 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       const pick = await resolve(body, body.force === true);
       if (!pick || !pick.videoId) {
-        diag.candidates = judged.length;
-        diag.botBlocked = S.playerBlockedUntil > Date.now();
-        diag.instanceDownUntil = S.instanceProxyDownUntil > Date.now() ? S.instanceProxyDownUntil : null;
         return json(res, 404, { error: "no full-length audio found", diag: lastDiag });
       }
       // identity guard: the judge winner must still match the LISTED song
