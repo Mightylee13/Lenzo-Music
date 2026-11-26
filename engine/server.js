@@ -30,10 +30,13 @@ const FALLBACK_HASHES = [
 
 const BASE = { referer: "https://open.spotify.com/", origin: "https://open.spotify.com", "user-agent": UA, "accept-language": "en" };
 const YT_CLIENTS = [
-  { clientName: "IOS", clientVersion: "20.10.4" },
-  { clientName: "ANDROID_MUSIC", clientVersion: "7.27.52" },
-  { clientName: "ANDROID", clientVersion: "20.10.38" },
-  { clientName: "TVHTML5", clientVersion: "7.20250312.16.00" },
+  // Each client needs its OWN user-agent: with the desktop Chrome UA on all of
+  // them YouTube answers LOGIN_REQUIRED everywhere (verified live — IOS and
+  // ANDROID return full audio when matched to their app user-agents).
+  { clientName: "IOS", clientVersion: "20.10.4", userAgent: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)" },
+  { clientName: "ANDROID", clientVersion: "20.10.38", userAgent: "com.google.android.youtube/20.10.38 (Linux; U; Android 15) gzip" },
+  { clientName: "ANDROID_MUSIC", clientVersion: "7.27.52", userAgent: "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 15) gzip" },
+  { clientName: "TVHTML5", clientVersion: "7.20250312.16.00", userAgent: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version" },
 ];
 
 /* ---------- tiny state + caches ---------- */
@@ -345,22 +348,36 @@ async function ytAudio(videoId, force = false) {
       try {
         const pRes = await tf("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
           method: "POST",
-          headers: { "content-type": "application/json", "user-agent": UA },
+          headers: { "content-type": "application/json", "user-agent": client.userAgent || UA },
           body: JSON.stringify({
-            context: { client: { ...client, hl: "en", gl: "US" } },
+            context: { client: { clientName: client.clientName, clientVersion: client.clientVersion, hl: "en", gl: "US" } },
             videoId,
             contentCheckOk: true,
             racyCheckOk: true,
           }),
         }, 8000);
         const pJson = await pRes.json();
-        if (pJson?.playabilityStatus?.status === "LOGIN_REQUIRED") { botBlocked = true; break; }
+        // LOGIN_REQUIRED on one client must NOT abort the rest — different
+        // clients get bot-blocked independently (break here once made a single
+        // IOS block kill ANDROID legs that would have succeeded).
+        if (pJson?.playabilityStatus?.status === "LOGIN_REQUIRED") { botBlocked = true; continue; }
         const streaming = pJson?.streamingData || {};
         const formats = [...(Array.isArray(streaming.adaptiveFormats) ? streaming.adaptiveFormats : []), ...(Array.isArray(streaming.formats) ? streaming.formats : [])];
         const audio = formats.filter((f) => f?.url && String(f?.mimeType || "").startsWith("audio/")).sort((a, b) => (Number(b?.bitrate) || 0) - (Number(a?.bitrate) || 0))[0];
         if (audio) {
+          // Deep-range gate: googlevideo URLs issued without a valid PoToken
+          // serve only the first ~2MB — every Range past that 403s. The
+          // browser then hits the wall mid-song, the element fires "ended",
+          // and playback skips. Probe the TAIL once; if deep ranges are
+          // refused this client is useless for full playback — keep looking.
+          const clen = Number(audio.contentLength) || 0;
+          const tailFrom = clen > 128000 ? clen - 65536 : 4000000;
+          const tail = await tf(audio.url, { headers: { Range: `bytes=${tailFrom}-`, "user-agent": client.userAgent || UA } }, 6000).catch(() => null);
+          const tailOk = tail && (tail.ok || tail.status === 206);
+          if (tail) { try { await tail.arrayBuffer(); } catch { /* drain best-effort */ } }
+          if (!tailOk) continue;
           S.playerBlockedUntil = 0;
-          last = { url: audio.url, mimeType: audio.mimeType, contentLength: audio.contentLength ? Number(audio.contentLength) : null, lengthSeconds: Number(pJson?.videoDetails?.lengthSeconds) || null };
+          last = { url: audio.url, mimeType: audio.mimeType, contentLength: clen || null, lengthSeconds: Number(pJson?.videoDetails?.lengthSeconds) || null, client: client.clientName };
           break;
         }
       } catch { /* next client */ }
@@ -378,6 +395,7 @@ async function ytAudio(videoId, force = false) {
     for (const settled of await Promise.allSettled(legs)) {
       if (settled.status === "fulfilled" && settled.value?.url) { last = settled.value; break; }
     }
+    if (last?.client === "mirror:ytmp3") console.log("[engine] mirror fallback serves", videoId);
     if (!last?.url) {
       if (hit) S.streamCache.delete(videoId);
       S.nullStream.set(videoId, Date.now()); // repeat hits 404 fast for NULL_STREAM_TTL
@@ -437,7 +455,7 @@ async function resolve(want, force = false) {
       // stale flagged state must not kill the whole engine for the TTL.
       const audio = await ytAudio(video.videoId, ignoreBlock ? true : force);
       if (audio?.url) {
-        const pick = { videoId: video.videoId, title: video.titleTxt, durationSec: audio.lengthSeconds, score };
+        const pick = { videoId: video.videoId, title: video.titleTxt, durationSec: audio.lengthSeconds, score, leg: audio.client || "youtube-direct" };
         evict(S.resolveCache);
         S.resolveCache.set(key, { ts: Date.now(), pick });
         return pick;
@@ -548,6 +566,7 @@ const server = http.createServer(async (req, res) => {
         videoId: pick.videoId,
         title: pick.title,
         durationSec: pick.durationSec,
+        leg: pick.leg,
         streamUrl: `/stream/${pick.videoId}`,
         resolvedMs: Date.now() - t0,
       });
