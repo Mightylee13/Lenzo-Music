@@ -343,6 +343,10 @@ async function ytAudio(videoId, force = false) {
   const directBlocked = !force && S.playerBlockedUntil > Date.now();
   let last = null;
   let botBlocked = false;
+  // Kick the mirror conversion EARLY (fire-and-forget): when the direct legs
+  // fail — the common case on blocked datacenter IPs — its ~10-15s has
+  // already been running during the player probes instead of starting after.
+  const mirrorBg = mirrorAudio(videoId).catch(() => null);
   if (!directBlocked) {
     for (const client of YT_CLIENTS) {
       try {
@@ -372,10 +376,13 @@ async function ytAudio(videoId, force = false) {
           // refused this client is useless for full playback — keep looking.
           const clen = Number(audio.contentLength) || 0;
           const tailFrom = clen > 128000 ? clen - 65536 : 4000000;
-          const tail = await tf(audio.url, { headers: { Range: `bytes=${tailFrom}-`, "user-agent": client.userAgent || UA } }, 6000).catch(() => null);
+          const tail = await tf(audio.url, { headers: { Range: `bytes=${tailFrom}-`, "user-agent": client.userAgent || UA } }, 4000).catch(() => null);
           const tailOk = tail && (tail.ok || tail.status === 206);
           if (tail) { try { await tail.arrayBuffer(); } catch { /* drain best-effort */ } }
-          if (!tailOk) continue;
+          // A range-limited URL is URL-level, not client-level: if the tail
+          // is refused, every other client will be too — go straight to the
+          // (already-running) mirror race instead of probing the ladder.
+          if (!tailOk) break;
           S.playerBlockedUntil = 0;
           last = { url: audio.url, mimeType: audio.mimeType, contentLength: clen || null, lengthSeconds: Number(pJson?.videoDetails?.lengthSeconds) || null, client: client.clientName };
           break;
@@ -388,10 +395,9 @@ async function ytAudio(videoId, force = false) {
       S.playerBlockedUntil = Date.now() + PLAYER_BLOCK_TTL;
       console.log("[engine] youtube player bot-blocked — instance proxies take over");
     }
-    // The direct players already burned seconds getting us here — the proxy
-    // legs now run RACED (first success wins), not serially: serially they
-    // stacked to a ~90s worst case seen live on Railway.
-    const legs = [ytViaInstanceProxy(videoId), mirrorAudio(videoId)];
+    // The mirror leg started in the background at the top — by the time we
+    // reach here it has usually finished; instance probes still race it.
+    const legs = [ytViaInstanceProxy(videoId), mirrorBg];
     for (const settled of await Promise.allSettled(legs)) {
       if (settled.status === "fulfilled" && settled.value?.url) { last = settled.value; break; }
     }
