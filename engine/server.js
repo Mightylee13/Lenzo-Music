@@ -384,7 +384,7 @@ async function ytAudio(videoId, force = false) {
           // (already-running) mirror race instead of probing the ladder.
           if (!tailOk) break;
           S.playerBlockedUntil = 0;
-          last = { url: audio.url, mimeType: audio.mimeType, contentLength: clen || null, lengthSeconds: Number(pJson?.videoDetails?.lengthSeconds) || null, client: client.clientName };
+          last = { url: audio.url, mimeType: audio.mimeType, contentLength: clen || null, lengthSeconds: Number(pJson?.videoDetails?.lengthSeconds) || null, videoTitle: runsText(pJson?.videoDetails?.title) || null, client: client.clientName };
           break;
         }
       } catch { /* next client */ }
@@ -419,6 +419,29 @@ let lastDiag = null; // attached to /resolve 404s for hop-level debugging
 async function resolve(want, force = false) {
   const title = (want.title || "").trim();
   const artist = (want.artist || "").trim();
+  if (!title && !want.videoId) return null;
+
+  // Direct videoId hand-off: the app already knows the YouTube id for
+  // youtube-sourced catalogue tracks (tr_yt_*). Their listings carry the
+  // channel name in the title ("Alakori - Falz, Dice Ailes"), which the
+  // judge can never re-find through search — resolve the id outright.
+  if (want.videoId && /^[A-Za-z0-9_-]{8,16}$/.test(want.videoId)) {
+    const key = `r:vid:${want.videoId}`;
+    const cachedPick = force ? undefined : S.resolveCache.get(key);
+    if (cachedPick && Date.now() - cachedPick.ts < RESOLVE_TTL_OK) return cachedPick.pick;
+    const audio = await ytAudio(want.videoId, force);
+    (lastDiag = { spotify: null, searches: [], candidates: 1, botBlocked: false, instanceDownUntil: null, videoIdDirect: true });
+    if (!audio?.url) {
+      S.nullStream.set(want.videoId, Date.now());
+      return null;
+    }
+    const pick = { videoId: want.videoId, title: audio.videoTitle || title, durationSec: audio.lengthSeconds, score: 1, leg: audio.client || "youtube-direct" };
+    evict(S.resolveCache);
+    S.resolveCache.set(key, { ts: Date.now(), pick });
+    S.playerBlockedUntil = 0;
+    return pick;
+  }
+
   if (!title) return null;
   const key = `r:${slug(title)}::${slug(artist.split(",")[0])}`;
   const hit = force ? undefined : S.resolveCache.get(key);

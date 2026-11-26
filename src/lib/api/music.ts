@@ -759,10 +759,14 @@ async function resolveViaEngine(track: Track, force = false): Promise<ResolvedAu
     if (REMOTE_ENGINE_TOKEN) headers["x-engine-token"] = REMOTE_ENGINE_TOKEN;
     const remote = await withTimeout(
       (async () => {
+        // YouTube-sourced tracks already carry their video id — the engine
+        // then skips search+judging entirely (channel-named listings like
+        // "Alakori - Falz, Dice Ailes" can never be found by search again).
+        const videoId = track.id.startsWith("tr_yt_") ? track.providerId || track.id.replace(/^tr_yt_/, "") : undefined;
         const r = await fetch(`${REMOTE_ENGINE}/resolve`, {
           method: "POST",
           headers,
-          body: JSON.stringify({ title: track.title, artist: track.artist, force }),
+          body: JSON.stringify({ title: track.title, artist: track.artist, force, videoId }),
           cache: "no-store",
         });
         if (!r.ok) throw new Error(`engine host ${r.status}`);
@@ -779,7 +783,10 @@ async function resolveViaEngine(track: Track, force = false): Promise<ResolvedAu
       duration: remote.durationSec ? Math.round(remote.durationSec) : undefined,
       engineHost: true,
     };
-    if (!identityMatches(track, resolved)) throw new Error("engine audio identity mismatch");
+    // tr_yt_ tracks ARE their video id — the user tapped that exact listing,
+    // so playback is correct by definition; the title guard is for
+    // search-matched picks only.
+    if (!track.id.startsWith("tr_yt_") && !identityMatches(track, resolved)) throw new Error("engine audio identity mismatch");
     return resolved;
   }
   const res = await engineResolve({ title: track.title, artist: track.artist }, force, { prove: true });
