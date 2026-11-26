@@ -46,6 +46,7 @@ const S = {
   searchCache: new Map(),
   resolveCache: new Map(),
   streamCache: new Map(),
+  nullStream: new Map(), // videoId → ts of a recent total-audio failure
 };
 const SEARCH_TTL_OK = 10 * 60 * 1000, SEARCH_TTL_FAIL = 60 * 1000;
 const RESOLVE_TTL_OK = 30 * 60 * 1000;
@@ -56,6 +57,21 @@ const INSTANCE_TARGETS = ["https://inv.nadeko.net", "https://invidious.nerdvpn.d
 const MIRROR_DOWN_TTL = 5 * 60 * 1000;
 const MIRROR_BASE = (process.env.MIRROR_BASE_URL || "https://api.theresav.eu").replace(/\/+$/, "");
 const MIRROR_KEY = process.env.MIRROR_API_KEY || "Lenzorah"; // env override on Railway; fallback = app's mirror key
+
+const NULL_STREAM_TTL = 60 * 1000; // remember a video that failed ALL audio legs for 60s — repeat /stream hits 404 fast instead of re-running the whole chain
+const IN_FLIGHT = new Map(); // dedup: videoId → running ytAudio promise (concurrent player retries share one chain)
+
+/** One ytAudio for a videoId runs at a time; concurrent callers await the same promise. */
+function ytAudioShared(videoId, force) {
+  const k = `${videoId}:${force ? 1 : 0}`;
+  if (IN_FLIGHT.has(k)) return IN_FLIGHT.get(k);
+  const p = (async () => {
+    try { return await ytAudio(videoId, force); }
+    finally { IN_FLIGHT.delete(k); }
+  })();
+  IN_FLIGHT.set(k, p);
+  return p;
+}
 
 function slug(t) {
   return (t || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -355,17 +371,17 @@ async function ytAudio(videoId, force = false) {
       S.playerBlockedUntil = Date.now() + PLAYER_BLOCK_TTL;
       console.log("[engine] youtube player bot-blocked — instance proxies take over");
     }
-    const viaInstance = await ytViaInstanceProxy(videoId);
-    if (viaInstance) last = viaInstance;
-    if (!last?.url) {
-      const viaMirror = await mirrorAudio(videoId);
-      if (viaMirror) {
-        console.log("[engine] mirror fallback serves", videoId);
-        last = viaMirror;
-      }
+    // The direct players already burned seconds getting us here — the proxy
+    // legs now run RACED (first success wins), not serially: serially they
+    // stacked to a ~90s worst case seen live on Railway.
+    const legs = [ytViaInstanceProxy(videoId), mirrorAudio(videoId)];
+    for (const settled of await Promise.allSettled(legs)) {
+      if (settled.status === "fulfilled" && settled.value?.url) { last = settled.value; break; }
     }
     if (!last?.url) {
       if (hit) S.streamCache.delete(videoId);
+      S.nullStream.set(videoId, Date.now()); // repeat hits 404 fast for NULL_STREAM_TTL
+      evict(S.nullStream);
       return null;
     }
   }
@@ -524,6 +540,10 @@ const server = http.createServer(async (req, res) => {
       }
       // identity guard: the judge winner must still match the LISTED song
       if (!identityMatches(body.title, pick.title)) return json(res, 404, { error: "identity mismatch" });
+      // PRE-WARM (fire-and-forget): the player always hits /stream right
+      // after a resolve — fetching the audio url now turns that click into
+      // instant playback and keeps the googlevideo url same-IP fresh.
+      ytAudioShared(pick.videoId, false).catch(() => {});
       return json(res, 200, {
         videoId: pick.videoId,
         title: pick.title,
@@ -536,11 +556,16 @@ const server = http.createServer(async (req, res) => {
     let m = path.match(/^\/stream\/([A-Za-z0-9_-]{8,16})$/);
     if (m) {
       const videoId = m[1];
+      const failedRecentlyAt = S.nullStream.get(videoId);
       let audio = S.streamCache.get(videoId) && Date.now() - S.streamCache.get(videoId).ts < STREAM_TTL
         ? S.streamCache.get(videoId)
-        : await ytAudio(videoId, false);
-      if (!audio?.url) audio = await ytAudio(videoId, true); // force re-resolve even when bot-block flagged
-      if (!audio?.url) return json(res, 404, { error: "no audio" });
+        : await ytAudioShared(videoId, false);
+      const freshFailure = !audio?.url && S.nullStream.get(videoId) !== failedRecentlyAt; // first attempt just exhausted every leg
+      if (!audio?.url && !freshFailure) audio = await ytAudioShared(videoId, true); // force re-resolve even when bot-block flagged
+      if (!audio?.url) {
+        if (S.nullStream.get(videoId) !== failedRecentlyAt || !failedRecentlyAt) S.nullStream.set(videoId, Date.now());
+        return json(res, 404, { error: "no audio" });
+      }
       const range = req.headers.range;
       const fetchUp = (r) => fetch(audio.url, { headers: r ? { Range: r, "user-agent": UA } : { "user-agent": UA } });
       // googlevideo rejects full-body fetches on some connections — a no-Range
@@ -549,7 +574,8 @@ const server = http.createServer(async (req, res) => {
       if ((!up.ok || up.status === 403) && !range) up = await fetchUp("bytes=0-");
       if (up.status === 403 || up.status === 410) {
         // cached url expired/binded — force one same-IP re-resolve
-        audio = await ytAudio(videoId, true);
+        audio = await ytAudioShared(videoId, true);
+        S.nullStream.delete(videoId);
         if (!audio?.url) return json(res, 404, { error: "no audio" });
         up = await fetchUp(range || "bytes=0-");
       }
