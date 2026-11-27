@@ -436,7 +436,7 @@ function updateMediaSession(track: Track, resolved: ResolvedAudio | null) {
       artist: track.artist,
       album: track.album ?? "Lenzo Music",
       artwork: [
-        { src: resolved?.artwork ?? track.artwork, sizes: "512x512", type: "image/jpeg" },
+        { src: track.artwork ?? resolved?.artwork, sizes: "512x512", type: "image/jpeg" },
       ],
     });
     // iOS quirk (esp. standalone PWA): assigning metadata can drop the

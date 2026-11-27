@@ -557,15 +557,25 @@ async function ytViaInstanceProxy(videoId) {
  * anywhere — this keeps the engine productive even while YouTube
  * bot-blocks OR refreshes a googlevideo url mid-stream.
  */
-async function mirrorAudio(videoId) {
+async function mirrorAudio(videoId, force = false) {
   if (!MIRROR_KEY) return null;
-  if (S.mirrorDownUntil > Date.now()) return null;
+  // A single failed conversion (25s timeout on a slow job) must NOT flag the
+  // mirror down engine-wide for 5 minutes — with direct legs bot-blocked that
+  // window is a total outage. Only sustained failures (3+) cool it down,
+  // and `force` (last-resort after every other leg died) always tries.
+  if (!force && S.mirrorDownUntil > Date.now()) return null;
   try {
     const url = `https://www.youtube.com/watch?v=${videoId}`;
     const r = await tf(`${MIRROR_BASE}/api/download/ytmp3?url=${encodeURIComponent(url)}`, { headers: { "x-apikey": MIRROR_KEY, accept: "application/json" } }, 25000);
     const j = await r.json();
     const dl = j?.download_url || j?.downloadUrl;
-    if (!dl) return null;
+    if (!dl) {
+      S.mirrorFails = (S.mirrorFails || 0) + 1;
+      if (S.mirrorFails >= 3) S.mirrorDownUntil = Date.now() + MIRROR_DOWN_TTL;
+      return null;
+    }
+    S.mirrorFails = 0;
+    S.mirrorDownUntil = 0;
     return {
       url: dl,
       mimeType: "audio/mpeg",
@@ -574,7 +584,8 @@ async function mirrorAudio(videoId) {
       client: "mirror:ytmp3",
     };
   } catch {
-    S.mirrorDownUntil = Date.now() + MIRROR_DOWN_TTL;
+    S.mirrorFails = (S.mirrorFails || 0) + 1;
+    if (S.mirrorFails >= 3) S.mirrorDownUntil = Date.now() + MIRROR_DOWN_TTL;
     return null;
   }
 }
@@ -643,6 +654,11 @@ async function ytAudio(videoId, force = false) {
     const legs = [ytViaInstanceProxy(videoId), mirrorBg];
     for (const settled of await Promise.allSettled(legs)) {
       if (settled.status === "fulfilled" && settled.value?.url) { last = settled.value; break; }
+    }
+    if (!last?.url) {
+      // Nothing worked — one forced mirror attempt ignoring any cooldown:
+      // a stale flag must never turn a playable song into a 404.
+      last = await mirrorAudio(videoId, true).catch(() => null) ?? last;
     }
     if (last?.client === "mirror:ytmp3") console.log("[engine] mirror fallback serves", videoId);
     if (!last?.url) {

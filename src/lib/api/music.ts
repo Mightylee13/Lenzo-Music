@@ -892,7 +892,13 @@ export async function resolveTrack(track: Track, force = false): Promise<Resolve
       hedgedResolve(track, attempts),
       RESOLVE_DEADLINE_MS,
       "resolve deadline exceeded",
-    ).catch((err: unknown) => {
+    ).then((resolved) => {
+      // The catalogue artwork is the song's real cover. A converter's
+      // thumbnail is the YouTube video's image (often a lyric/visualiser
+      // frame or a single's cover) — never let it replace the real one.
+      if (track.artwork && resolved.artwork !== track.artwork) resolved.artwork = track.artwork;
+      return resolved;
+    }).catch((err: unknown) => {
       throw new ApiError(
         `Could not find streamable audio: ${err instanceof Error ? err.message : "unknown"}`,
         404,
