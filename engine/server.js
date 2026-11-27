@@ -143,9 +143,10 @@ async function downloadToDisk(videoId, url, minBytes = 0) {
       rs.pipe(ws).on("finish", resolve).on("error", reject);
     });
     // integrity: a truncated or client-cancelled download must never
-    // become the cache — partial songs are exactly the bug being fixed
+    // become the cache — partial songs are exactly the bug being fixed.
+    // No tolerance: the observed fake was within 6% of a 32kbps floor.
     const floor = Math.max(expected, minBytes);
-    if (floor && written < floor * 0.9) {
+    if (floor && written < floor) {
       await fsp.unlink(part).catch(() => {});
       TOTALS.delete(videoId);
       throw new Error(`download truncated ${written}/${floor}`);
@@ -190,12 +191,13 @@ async function isCachedComplete(videoId) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Minimum believable byte size for a song of a given audio object: the
- * mirror's claimed filesize AND a duration floor (~32kbps) — the mirror has
+ * mirror's claimed filesize AND a duration floor (96kbps — converters emit
+ * 128kbps+; the observed fake was 30.8kbps for a 222s song) — the mirror has
  * been observed claiming a full filesize while serving a 47s slice of a
  * 3:42 song, so the duration floor must always apply too. */
 function minBytesFor(audio) {
   if (!audio) return 0;
-  const byDuration = audio.lengthSeconds ? audio.lengthSeconds * 4096 : 0;
+  const byDuration = audio.lengthSeconds ? audio.lengthSeconds * 12000 : 0;
   return Math.max(audio.contentLength || 0, byDuration);
 }
 
