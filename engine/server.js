@@ -188,7 +188,16 @@ async function serveGrowing(req, res, videoId, contentType, dl, redownload) {
 
   // Unknown total (mirror sent no content-length): still serve progressively —
   // a non-seekable 200 beats falling back to the mirror's range-ignoring pipe.
+  // A seek (range start > 0) waits for the download to finish, then serves a
+  // real 206 from disk — serving from 0 would corrupt playback.
   if (!total) {
+    const rangeU = req.headers.range;
+    const startU = rangeU ? parseInt((/^bytes=(\d*)/.exec(rangeU) || [])[1] || "0", 10) : 0;
+    if (startU > 0) {
+      if (dl) { try { await Promise.race([dl, sleep(300000)]); } catch { /* failed — fall through */ } }
+      if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
+      return json(res, 502, { error: "download failed" });
+    }
     res.writeHead(200, {
       "content-type": contentType || "audio/mpeg",
       "accept-ranges": "none",
