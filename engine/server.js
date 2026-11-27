@@ -55,6 +55,7 @@ const S = {
   resolveCache: new Map(),
   streamCache: new Map(),
   nullStream: new Map(), // videoId → ts of a recent total-audio failure
+  alternates: new Map(), // videoId → other uploads of the same song (judge's ranked runners-up)
 };
 const SEARCH_TTL_OK = 10 * 60 * 1000, SEARCH_TTL_FAIL = 60 * 1000;
 const RESOLVE_TTL_OK = 30 * 60 * 1000;
@@ -198,155 +199,6 @@ function minBytesFor(audio) {
   return Math.max(audio.contentLength || 0, byDuration);
 }
 
-/**
- * Progressive serving from the growing .part file with REAL range semantics:
- * the total size is announced up front (from the download's content-length),
- * so the player knows the duration and can seek from second one. A seek into
- * bytes not yet downloaded waits (bounded) for the download to reach them
- * instead of stalling the whole song. Returns false when the total size is
- * unknown or no data appeared — the caller then falls back to the legacy pipe.
- * `dl` is the in-flight download promise; `redownload` retries a dead
- * download once so a mid-song mirror hiccup does not truncate the song.
- */
-async function serveGrowing(req, res, videoId, contentType, dl, redownload) {
-  const p = audioPath(videoId);
-  const part = `${p}.part`;
-  // Mirror first byte can be slow (observed >5s on cold Railway→mirror);
-  // wait up to 20s as long as the download is actually alive, then give up.
-  for (let i = 0; i < 200 && !fs.existsSync(part) && !fs.existsSync(p); i++) {
-    if (dl && !DOWNLOADING.has(videoId) && i > 20) break; // download died without a part
-    await sleep(100);
-  }
-  if (!fs.existsSync(part) && !fs.existsSync(p)) return false;
-
-  let total = TOTALS.get(videoId) || 0;
-  if (!total && dl) {
-    try { total = (await Promise.race([dl, sleep(3000).then(() => 0)])) || TOTALS.get(videoId) || 0; } catch { total = 0; }
-  }
-  if (!total) { try { total = (await fsp.stat(p)).size; } catch { total = 0; } }
-  if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
-
-  // Unknown total (mirror sent no content-length): still serve progressively —
-  // a non-seekable 200 beats falling back to the mirror's range-ignoring pipe.
-  // A seek (range start > 0) waits for the download to finish, then serves a
-  // real 206 from disk — serving from 0 would corrupt playback.
-  if (!total) {
-    const rangeU = req.headers.range;
-    const startU = rangeU ? parseInt((/^bytes=(\d*)/.exec(rangeU) || [])[1] || "0", 10) : 0;
-    if (startU > 0) {
-      if (dl) { try { await Promise.race([dl, sleep(300000)]); } catch { /* failed — fall through */ } }
-      if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
-      return json(res, 502, { error: "download failed" });
-    }
-    // same no-headers commitment: a vanished part must fall back, not serve 0 bytes
-    for (let i = 0; i < 100; i++) {
-      const sz = await fsp.stat(part).then((s) => s.size).catch(() => 0);
-      if (sz > 0) break;
-      if (!DOWNLOADING.has(videoId) && i > 10) return false;
-      await sleep(100);
-    }
-    res.writeHead(200, {
-      "content-type": contentType || "audio/mpeg",
-      "accept-ranges": "none",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-    });
-    if (req.method === "HEAD") { res.end(); return true; }
-    res.on("error", () => { /* client gone — the loop notices via destroyed */ });
-    let sent = 0;
-    const deadline2 = Date.now() + 300000;
-    for (;;) {
-      if (res.writableEnded || res.destroyed || Date.now() > deadline2) return true;
-      const complete = await isCachedComplete(videoId);
-      const size = await fsp.stat(complete ? p : part).then((s) => s.size).catch(() => 0);
-      if (sent < size) {
-        const end2 = size - 1;
-        await new Promise((resolve) => {
-          const rs = fs.createReadStream(complete ? p : part, { start: sent, end: end2 });
-          const done = () => { sent = end2 + 1; resolve(); };
-          rs.on("end", done);
-          rs.on("error", () => { try { rs.destroy(); } catch { /* gone */ } done(); });
-          rs.pipe(res, { end: false });
-        });
-        continue;
-      }
-      if (complete) break;
-      if (!DOWNLOADING.has(videoId) && !fs.existsSync(part)) break;
-      await sleep(120);
-    }
-    res.end();
-    return true;
-  }
-
-  const range = req.headers.range;
-  const m = range ? /^bytes=(\d*)-(\d*)/.exec(range) : null;
-  let start = 0;
-  let end = total - 1;
-  let status = 200;
-  if (m && m[1]) {
-    start = parseInt(m[1], 10);
-    if (m[2]) end = Math.min(parseInt(m[2], 10), total - 1);
-    status = 206;
-  }
-  if (start >= total) return json(res, 416, { error: "range past end" });
-
-  // Do not commit headers until the download has actual bytes (or the file
-  // completed) — a part that vanishes (failed download) must fall back to
-  // the caller's direct pipe, never become a 0-byte response.
-  for (let i = 0; i < 100; i++) {
-    const sz = await fsp.stat(part).then((s) => s.size).catch(() => 0);
-    if (sz > 0 || (await isCachedComplete(videoId))) break;
-    if (!DOWNLOADING.has(videoId) && i > 10) return false;
-    await sleep(100);
-  }
-  if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
-
-  res.writeHead(status, {
-    "content-type": contentType || "audio/mpeg",
-    "content-length": end - start + 1,
-    ...(status === 206 ? { "content-range": `bytes ${start}-${end}/${total}` } : {}),
-    "accept-ranges": "bytes",
-    "cache-control": "no-store",
-    "access-control-allow-origin": "*",
-  });
-  if (req.method === "HEAD") { res.end(); return true; }
-  res.on("error", () => { /* client gone — the loop notices via destroyed */ });
-
-  let sent = start;
-  let retried = false;
-  const deadline = Date.now() + 300000; // generous cap; a stalled client ends via destroyed
-  while (sent <= end && !res.writableEnded && !res.destroyed && Date.now() < deadline) {
-    const complete = await isCachedComplete(videoId);
-    const size = await fsp.stat(complete ? p : part).then((s) => s.size).catch(() => 0);
-    if (sent < size) {
-      const chunkEnd = Math.min(size - 1, end);
-      await new Promise((resolve) => {
-        const rs = fs.createReadStream(complete ? p : part, { start: sent, end: chunkEnd });
-        // completion is watched on the READ stream ("end") — .pipe() returns
-        // the destination and would deadlock the loop if awaited there
-        const done = () => { sent = chunkEnd + 1; resolve(); };
-        rs.on("end", done);
-        rs.on("error", () => { try { rs.destroy(); } catch { /* gone */ } done(); });
-        rs.pipe(res, { end: false });
-      });
-      continue;
-    }
-    if (sent > end) break;
-    if (!DOWNLOADING.has(videoId)) {
-      if (!retried && !complete && sent <= end) {
-        retried = true; // download died mid-song: one fresh attempt
-        dl = redownload ? redownload() : null;
-        continue;
-      }
-      break;
-    }
-    await sleep(120);
-  }
-  res.end();
-  return true;
-}
-
-/** Serve a completed disk file with proper 206 range semantics. */
 async function serveFromDisk(req, res, videoId, contentType) {
   const p = audioPath(videoId);
   const st = await fsp.stat(p).catch(() => null);
@@ -814,6 +666,17 @@ async function resolve(want, force = false) {
         const pick = { videoId: video.videoId, title: video.titleTxt, durationSec: audio.lengthSeconds, score, leg: audio.client || "youtube-direct" };
         evict(S.resolveCache);
         S.resolveCache.set(key, { ts: Date.now(), pick });
+        // remember the runner-up uploads — when this video's conversion is
+        // broken (truncated/non-audio), /stream can pull another upload of
+        // the same song instead of failing or serving a fake 47s file
+        const alts = judged
+          .filter((j) => j.score >= 0.4 && j.hit.videoId !== video.videoId)
+          .slice(0, 3)
+          .map((j) => j.hit.videoId);
+        if (alts.length) {
+          if (S.alternates.size > 256) S.alternates.delete(S.alternates.keys().next().value);
+          S.alternates.set(video.videoId, alts);
+        }
         return pick;
       }
     }
@@ -939,8 +802,22 @@ const server = http.createServer(async (req, res) => {
         try {
           const a = await ytAudioShared(pick.videoId, false);
           if (a?.url && !(await isCachedComplete(pick.videoId))) {
-            await downloadToDisk(pick.videoId, a.url, minBytesFor(a));
-            console.log(`[engine] disk cache seeded ${pick.videoId}`);
+            try {
+              await downloadToDisk(pick.videoId, a.url, minBytesFor(a));
+              console.log(`[engine] disk cache seeded ${pick.videoId}`);
+              return;
+            } catch { /* broken conversion — try other uploads below */ }
+            for (const alt of S.alternates.get(pick.videoId) || []) {
+              const a2 = await ytAudioShared(alt, false).catch(() => null);
+              if (!a2?.url) continue;
+              try {
+                const size = await downloadToDisk(alt, a2.url, minBytesFor(a2));
+                await fsp.copyFile(audioPath(alt), audioPath(pick.videoId));
+                TOTALS.set(pick.videoId, size);
+                console.log(`[engine] disk cache seeded ${pick.videoId} via alternate ${alt}`);
+                return;
+              } catch { continue; }
+            }
           }
         } catch { /* best effort */ }
       })();
@@ -972,22 +849,37 @@ const server = http.createServer(async (req, res) => {
         return json(res, 404, { error: "no audio" });
       }
       S.nullStream.delete(videoId);
-      // DISK-CACHE PATH: the engine downloads the full song ONCE with its
-      // own fetch, serves the growing file progressively so playback starts
-      // immediately, and every later request gets real 206 ranges from disk
-      // — mirror expiry, seek breakage and crackle all disappear after the
-      // first play.
-      // DISK-CACHE PATH: seed the download (shared — concurrent callers await
-      // the same promise), then serve progressively with real range
-      // semantics — the player can seek from second one, and seeks into
-      // not-yet-downloaded bytes wait for the data instead of the whole file.
-      {
-        const dl = downloadToDisk(videoId, audio.url, minBytesFor(audio)).catch(() => null);
-        const grew = await serveGrowing(req, res, videoId, audio.mimeType, dl, () =>
-          downloadToDisk(videoId, audio.url, minBytesFor(audio)).catch(() => null)
-        );
-        if (grew) return;
+      // MIRROR PATH: the engine downloads the full song ONCE with its own
+      // fetch and the download is VALIDATED (real audio magic bytes, size
+      // vs claimed/duration) BEFORE any of it is served — progressive
+      // streaming of an unvalidated file is how a fake 47s slice of a 3:42
+      // song reached players. The download starts at /resolve (pre-warm),
+      // so this wait is usually just the remaining seconds.
+      if (audio.client === "mirror:ytmp3") {
+        const dl = downloadToDisk(videoId, audio.url, minBytesFor(audio));
+        const outcome = await dl.then(() => "ok").catch((e) => (e instanceof Error ? e.message : "failed"));
+        if (outcome === "ok" && (await serveFromDisk(req, res, videoId).catch(() => false))) return;
+        // Broken conversion for THIS video (truncated slice, non-audio
+        // bytes): re-serving it would play a fake song or fail mid-way.
+        // Rescue: pull another upload of the same song (the judge's
+        // runners-up) and cache its bytes under this videoId, so the
+        // player's stream url never changes.
+        for (const alt of S.alternates.get(videoId) || []) {
+          const a2 = await ytAudioShared(alt, false).catch(() => null);
+          if (!a2?.url) continue;
+          try {
+            const size = await downloadToDisk(alt, a2.url, minBytesFor(a2));
+            await fsp.copyFile(audioPath(alt), audioPath(videoId));
+            TOTALS.set(videoId, size);
+            evict(S.streamCache);
+            S.streamCache.set(videoId, { ts: Date.now(), ...a2 });
+            console.log(`[engine] broken download rescued via alternate upload ${alt}`);
+            if (await serveFromDisk(req, res, videoId).catch(() => false)) return;
+          } catch { continue; }
+        }
+        if (outcome !== "ok") return json(res, 502, { error: "audio failed validation" });
       }
+      // DIRECT LEG (googlevideo): forward ranges — googlevideo honors them.
       const range = req.headers.range;
       const fetchUp = (r) => fetch(audio.url, { headers: r ? { Range: r, "user-agent": UA } : { "user-agent": UA } });
       // googlevideo rejects full-body fetches on some connections — a no-Range
@@ -1001,7 +893,7 @@ const server = http.createServer(async (req, res) => {
         up = await fetchUp(range || "bytes=0-");
       }
       if (!up.ok && up.status !== 206) return json(res, 502, { error: `upstream ${up.status}` });
-      return pipeResponse(up, req, res);
+      return pipeResponse(up, req, res, audio.mimeType);
     }
 
     if (path === "/search") {
