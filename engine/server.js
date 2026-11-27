@@ -171,7 +171,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function serveGrowing(req, res, videoId, contentType, dl, redownload) {
   const p = audioPath(videoId);
   const part = `${p}.part`;
-  for (let i = 0; i < 50 && !fs.existsSync(part) && !fs.existsSync(p); i++) await sleep(100);
+  // Mirror first byte can be slow (observed >5s on cold Railway→mirror);
+  // wait up to 20s as long as the download is actually alive, then give up.
+  for (let i = 0; i < 200 && !fs.existsSync(part) && !fs.existsSync(p); i++) {
+    if (dl && !DOWNLOADING.has(videoId) && i > 20) break; // download died without a part
+    await sleep(100);
+  }
   if (!fs.existsSync(part) && !fs.existsSync(p)) return false;
 
   let total = TOTALS.get(videoId) || 0;
@@ -179,8 +184,43 @@ async function serveGrowing(req, res, videoId, contentType, dl, redownload) {
     try { total = (await Promise.race([dl, sleep(3000).then(() => 0)])) || TOTALS.get(videoId) || 0; } catch { total = 0; }
   }
   if (!total) { try { total = (await fsp.stat(p)).size; } catch { total = 0; } }
-  if (!total) return false;
   if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
+
+  // Unknown total (mirror sent no content-length): still serve progressively —
+  // a non-seekable 200 beats falling back to the mirror's range-ignoring pipe.
+  if (!total) {
+    res.writeHead(200, {
+      "content-type": contentType || "audio/mpeg",
+      "accept-ranges": "none",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    if (req.method === "HEAD") { res.end(); return true; }
+    res.on("error", () => { /* client gone — the loop notices via destroyed */ });
+    let sent = 0;
+    const deadline2 = Date.now() + 300000;
+    for (;;) {
+      if (res.writableEnded || res.destroyed || Date.now() > deadline2) return true;
+      const complete = await isCachedComplete(videoId);
+      const size = await fsp.stat(complete ? p : part).then((s) => s.size).catch(() => 0);
+      if (sent < size) {
+        const end2 = size - 1;
+        await new Promise((resolve) => {
+          const rs = fs.createReadStream(complete ? p : part, { start: sent, end: end2 });
+          const done = () => { sent = end2 + 1; resolve(); };
+          rs.on("end", done);
+          rs.on("error", () => { try { rs.destroy(); } catch { /* gone */ } done(); });
+          rs.pipe(res, { end: false });
+        });
+        continue;
+      }
+      if (complete) break;
+      if (!DOWNLOADING.has(videoId) && !fs.existsSync(part)) break;
+      await sleep(120);
+    }
+    res.end();
+    return true;
+  }
 
   const range = req.headers.range;
   const m = range ? /^bytes=(\d*)-(\d*)/.exec(range) : null;
