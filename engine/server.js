@@ -89,6 +89,7 @@ function ytAudioShared(videoId, force) {
 const AUDIO_DIR = process.env.AUDIO_CACHE_DIR || path.join(os.tmpdir(), "engine-audio");
 const MAX_DISK_CACHE_BYTES = Number(process.env.AUDIO_CACHE_MAX_BYTES) || 400 * 1024 * 1024;
 const DOWNLOADING = new Map(); // videoId → download promise
+const TOTALS = new Map(); // videoId → expected total bytes (upstream content-length)
 
 function audioPath(videoId) { return path.join(AUDIO_DIR, `${videoId}.audio`); }
 
@@ -127,6 +128,7 @@ async function downloadToDisk(videoId, url) {
     const r = await tf(url, { headers: { "user-agent": UA } }, 60000); // no Range: whole file; a stalled mirror must abort, not hang the serve loop
     if (!r.ok || !r.body) throw new Error(`download upstream ${r.status}`);
     const expected = Number(r.headers.get("content-length")) || 0;
+    if (expected) TOTALS.set(videoId, expected);
     const ws = fs.createWriteStream(part);
     const rs = Readable.fromWeb(r.body);
     let written = 0;
@@ -145,7 +147,7 @@ async function downloadToDisk(videoId, url) {
     await fsp.rename(part, p);
     evictDisk();
     return written;
-  })().finally(() => DOWNLOADING.delete(videoId));
+  })().catch((e) => { TOTALS.delete(videoId); throw e; }).finally(() => DOWNLOADING.delete(videoId));
   DOWNLOADING.set(videoId, pr);
   return pr;
 }
@@ -157,46 +159,80 @@ async function isCachedComplete(videoId) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Progressive serving from the growing .part file: the player starts
- * receiving bytes the moment the engine's download has its first chunk,
- * without waiting for the whole song. Returns false when the download
- * never produced data (caller falls back to piping upstream directly).
+ * Progressive serving from the growing .part file with REAL range semantics:
+ * the total size is announced up front (from the download's content-length),
+ * so the player knows the duration and can seek from second one. A seek into
+ * bytes not yet downloaded waits (bounded) for the download to reach them
+ * instead of stalling the whole song. Returns false when the total size is
+ * unknown or no data appeared — the caller then falls back to the legacy pipe.
+ * `dl` is the in-flight download promise; `redownload` retries a dead
+ * download once so a mid-song mirror hiccup does not truncate the song.
  */
-async function serveGrowing(req, res, videoId, contentType) {
+async function serveGrowing(req, res, videoId, contentType, dl, redownload) {
   const p = audioPath(videoId);
   const part = `${p}.part`;
-  for (let i = 0; i < 50 && !fs.existsSync(part); i++) await sleep(100);
-  if (!fs.existsSync(part)) return false;
-  res.writeHead(200, {
+  for (let i = 0; i < 50 && !fs.existsSync(part) && !fs.existsSync(p); i++) await sleep(100);
+  if (!fs.existsSync(part) && !fs.existsSync(p)) return false;
+
+  let total = TOTALS.get(videoId) || 0;
+  if (!total && dl) {
+    try { total = (await Promise.race([dl, sleep(3000).then(() => 0)])) || TOTALS.get(videoId) || 0; } catch { total = 0; }
+  }
+  if (!total) { try { total = (await fsp.stat(p)).size; } catch { total = 0; } }
+  if (!total) return false;
+  if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
+
+  const range = req.headers.range;
+  const m = range ? /^bytes=(\d*)-(\d*)/.exec(range) : null;
+  let start = 0;
+  let end = total - 1;
+  let status = 200;
+  if (m && m[1]) {
+    start = parseInt(m[1], 10);
+    if (m[2]) end = Math.min(parseInt(m[2], 10), total - 1);
+    status = 206;
+  }
+  if (start >= total) return json(res, 416, { error: "range past end" });
+
+  res.writeHead(status, {
     "content-type": contentType || "audio/mpeg",
-    "accept-ranges": "none",
+    "content-length": end - start + 1,
+    ...(status === 206 ? { "content-range": `bytes ${start}-${end}/${total}` } : {}),
+    "accept-ranges": "bytes",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
   });
   if (req.method === "HEAD") { res.end(); return true; }
-  res.on("error", () => { /* client gone — the loop below notices via destroyed */ });
-  let sent = 0;
-  const deadline = Date.now() + 120000; // absolute cap: never hold a player connection open forever
-  for (;;) {
-    if (res.writableEnded || res.destroyed || Date.now() > deadline) return true;
+  res.on("error", () => { /* client gone — the loop notices via destroyed */ });
+
+  let sent = start;
+  let retried = false;
+  const deadline = Date.now() + 300000; // generous cap; a stalled client ends via destroyed
+  while (sent <= end && !res.writableEnded && !res.destroyed && Date.now() < deadline) {
     const complete = await isCachedComplete(videoId);
     const size = await fsp.stat(complete ? p : part).then((s) => s.size).catch(() => 0);
     if (sent < size) {
-      const end = size - 1;
+      const chunkEnd = Math.min(size - 1, end);
       await new Promise((resolve) => {
-        const rs = fs.createReadStream(complete ? p : part, { start: sent, end });
-        // NOTE: .pipe() returns the DESTINATION — completion must be watched
-        // on the READ stream ("end"), not on res, or the loop deadlocks.
-        const done = () => { sent = end + 1; resolve(); };
+        const rs = fs.createReadStream(complete ? p : part, { start: sent, end: chunkEnd });
+        // completion is watched on the READ stream ("end") — .pipe() returns
+        // the destination and would deadlock the loop if awaited there
+        const done = () => { sent = chunkEnd + 1; resolve(); };
         rs.on("end", done);
         rs.on("error", () => { try { rs.destroy(); } catch { /* gone */ } done(); });
         rs.pipe(res, { end: false });
       });
       continue;
     }
-    if (complete || res.writableEnded || res.destroyed) break;
-    // no new bytes yet — is the download still alive?
-    if (!DOWNLOADING.has(videoId) && !fs.existsSync(part) && !complete) break;
+    if (sent > end) break;
+    if (!DOWNLOADING.has(videoId)) {
+      if (!retried && !complete && sent <= end) {
+        retried = true; // download died mid-song: one fresh attempt
+        dl = redownload ? redownload() : null;
+        continue;
+      }
+      break;
+    }
     await sleep(120);
   }
   res.end();
@@ -810,27 +846,18 @@ const server = http.createServer(async (req, res) => {
       // immediately, and every later request gets real 206 ranges from disk
       // — mirror expiry, seek breakage and crackle all disappear after the
       // first play.
-      const range = req.headers.range;
-      const rangeStart = range ? parseInt((/^bytes=(\d*)/.exec(range) || [])[1] || "0", 10) : 0;
-      if (!range || rangeStart > 0) {
-        // seed the cache (shared — concurrent callers await the same download)
+      // DISK-CACHE PATH: seed the download (shared — concurrent callers await
+      // the same promise), then serve progressively with real range
+      // semantics — the player can seek from second one, and seeks into
+      // not-yet-downloaded bytes wait for the data instead of the whole file.
+      {
         const dl = downloadToDisk(videoId, audio.url).catch(() => null);
-        if (range && rangeStart > 0) {
-          // early seek into a not-yet-complete song: wait for the download,
-          // then serve the range from disk
-          await dl;
-          if (await serveFromDisk(req, res, videoId).catch(() => false)) return;
-          return json(res, 502, { error: "download failed" });
-        }
-        const grew = await serveGrowing(req, res, videoId, audio.mimeType);
-        if (grew) return;
-      } else if (rangeStart === 0) {
-        // open-from-0 request on a cold cache: same progressive serving
-        const dl = downloadToDisk(videoId, audio.url).catch(() => null);
-        void dl;
-        const grew = await serveGrowing(req, res, videoId, audio.mimeType);
+        const grew = await serveGrowing(req, res, videoId, audio.mimeType, dl, () =>
+          downloadToDisk(videoId, audio.url).catch(() => null)
+        );
         if (grew) return;
       }
+      const range = req.headers.range;
       const fetchUp = (r) => fetch(audio.url, { headers: r ? { Range: r, "user-agent": UA } : { "user-agent": UA } });
       // googlevideo rejects full-body fetches on some connections — a no-Range
       // request is retried as "everything from byte 0" (semantically identical).
