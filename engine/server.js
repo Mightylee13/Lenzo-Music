@@ -112,8 +112,11 @@ async function evictDisk() {
 }
 
 /** Fetch the complete song once with the engine's OWN fetch (independent of
- * what the player reads), verify integrity, then rename into the cache. */
-async function downloadToDisk(videoId, url) {
+ * what the player reads), verify integrity, then rename into the cache.
+ * `minBytes` guards against converters that claim a full filesize but serve
+ * a truncated file (observed: mirror claimed 4.4MB, delivered 353KB) — a
+ * short read must never become a "cached complete" song that stops early. */
+async function downloadToDisk(videoId, url, minBytes = 0) {
   const existing = DOWNLOADING.get(videoId);
   if (existing) return existing;
   const pr = (async () => {
@@ -140,9 +143,36 @@ async function downloadToDisk(videoId, url) {
     });
     // integrity: a truncated or client-cancelled download must never
     // become the cache — partial songs are exactly the bug being fixed
+    const floor = Math.max(expected, minBytes);
+    if (floor && written < floor * 0.9) {
+      await fsp.unlink(part).catch(() => {});
+      TOTALS.delete(videoId);
+      throw new Error(`download truncated ${written}/${floor}`);
+    }
     if (expected && written !== expected) {
       await fsp.unlink(part).catch(() => {});
+      TOTALS.delete(videoId);
       throw new Error(`download truncated ${written}/${expected}`);
+    }
+    // content check: converters sometimes serve HTML error pages, "Forbidden"
+    // text or even APK files in place of audio (observed live) — only real
+    // audio may enter the cache.
+    const head = Buffer.alloc(16);
+    const fd = await fsp.open(part, "r").catch(() => null);
+    if (fd) {
+      await fd.read(head, 0, 16, 0).catch(() => {});
+      await fd.close().catch(() => {});
+      const b4 = head.subarray(0, 4).toString("latin1");
+      const isAudio =
+        head.subarray(0, 3).toString("latin1") === "ID3" ||
+        (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) ||
+        b4 === "OggS" || b4 === "fLaC" || b4 === "RIFF" ||
+        head.subarray(4, 8).toString("latin1") === "ftyp";
+      if (!isAudio) {
+        await fsp.unlink(part).catch(() => {});
+        TOTALS.delete(videoId);
+        throw new Error("download is not audio");
+      }
     }
     await fsp.rename(part, p);
     evictDisk();
@@ -157,6 +187,16 @@ async function isCachedComplete(videoId) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Minimum believable byte size for a song of a given audio object: the
+ * mirror's claimed filesize, else ~32kbps over its duration (a smaller
+ * file is a truncated conversion, never a real full track). */
+function minBytesFor(audio) {
+  if (!audio) return 0;
+  if (audio.contentLength) return audio.contentLength;
+  if (audio.lengthSeconds) return audio.lengthSeconds * 4096;
+  return 0;
+}
 
 /**
  * Progressive serving from the growing .part file with REAL range semantics:
@@ -197,6 +237,13 @@ async function serveGrowing(req, res, videoId, contentType, dl, redownload) {
       if (dl) { try { await Promise.race([dl, sleep(300000)]); } catch { /* failed — fall through */ } }
       if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
       return json(res, 502, { error: "download failed" });
+    }
+    // same no-headers commitment: a vanished part must fall back, not serve 0 bytes
+    for (let i = 0; i < 100; i++) {
+      const sz = await fsp.stat(part).then((s) => s.size).catch(() => 0);
+      if (sz > 0) break;
+      if (!DOWNLOADING.has(videoId) && i > 10) return false;
+      await sleep(100);
     }
     res.writeHead(200, {
       "content-type": contentType || "audio/mpeg",
@@ -242,6 +289,17 @@ async function serveGrowing(req, res, videoId, contentType, dl, redownload) {
     status = 206;
   }
   if (start >= total) return json(res, 416, { error: "range past end" });
+
+  // Do not commit headers until the download has actual bytes (or the file
+  // completed) — a part that vanishes (failed download) must fall back to
+  // the caller's direct pipe, never become a 0-byte response.
+  for (let i = 0; i < 100; i++) {
+    const sz = await fsp.stat(part).then((s) => s.size).catch(() => 0);
+    if (sz > 0 || (await isCachedComplete(videoId))) break;
+    if (!DOWNLOADING.has(videoId) && i > 10) return false;
+    await sleep(100);
+  }
+  if (await isCachedComplete(videoId)) return serveFromDisk(req, res, videoId);
 
   res.writeHead(status, {
     "content-type": contentType || "audio/mpeg",
@@ -579,7 +637,7 @@ async function mirrorAudio(videoId, force = false) {
     return {
       url: dl,
       mimeType: "audio/mpeg",
-      contentLength: null,
+      contentLength: Number(j?.filesize) || null, // claimed size — verified at download time
       lengthSeconds: Number(j?.duration_sec) || null,
       client: "mirror:ytmp3",
     };
@@ -863,6 +921,14 @@ const server = http.createServer(async (req, res) => {
       if (!pick || !pick.videoId) {
         return json(res, 404, { error: "no full-length audio found", diag: lastDiag });
       }
+      if (body.force === true) {
+        // a forced resolve may be retrying a bad cached download (truncated
+        // converter output) — purge it so the re-download can't be skipped
+        await fsp.unlink(audioPath(pick.videoId)).catch(() => {});
+        await fsp.unlink(`${audioPath(pick.videoId)}.part`).catch(() => {});
+        TOTALS.delete(pick.videoId);
+        S.streamCache.delete(pick.videoId);
+      }
       // identity guard: the judge winner must still match the LISTED song
       if (!identityMatches(body.title, pick.title)) return json(res, 404, { error: "identity mismatch" });
       // PRE-WARM (fire-and-forget): the player always hits /stream right
@@ -873,7 +939,7 @@ const server = http.createServer(async (req, res) => {
         try {
           const a = await ytAudioShared(pick.videoId, false);
           if (a?.url && !(await isCachedComplete(pick.videoId))) {
-            await downloadToDisk(pick.videoId, a.url);
+            await downloadToDisk(pick.videoId, a.url, minBytesFor(a));
             console.log(`[engine] disk cache seeded ${pick.videoId}`);
           }
         } catch { /* best effort */ }
@@ -916,9 +982,9 @@ const server = http.createServer(async (req, res) => {
       // semantics — the player can seek from second one, and seeks into
       // not-yet-downloaded bytes wait for the data instead of the whole file.
       {
-        const dl = downloadToDisk(videoId, audio.url).catch(() => null);
+        const dl = downloadToDisk(videoId, audio.url, minBytesFor(audio)).catch(() => null);
         const grew = await serveGrowing(req, res, videoId, audio.mimeType, dl, () =>
-          downloadToDisk(videoId, audio.url).catch(() => null)
+          downloadToDisk(videoId, audio.url, minBytesFor(audio)).catch(() => null)
         );
         if (grew) return;
       }
@@ -947,7 +1013,7 @@ const server = http.createServer(async (req, res) => {
 
     return json(res, 404, { error: "not found" });
   } catch (err) {
-    console.error(`[http] ${req.method} ${path} -> ${err.message}`);
+    console.error(`[http] ${req.method} ${path} -> ${err.message}`, err.stack?.split("\n").slice(1, 4).join(" | "));
     // Headers may already be on the wire (mid-stream failure) — in that
     // case we can only disconnect, never send a JSON error over it.
     if (res.headersSent) { try { res.destroy(); } catch { /* gone */ } return; }
