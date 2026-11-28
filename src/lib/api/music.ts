@@ -73,7 +73,9 @@ function cached<T>(
   // the whole TTL. The degraded value is re-produced fresh (outside the
   // Data Cache) and stored nowhere; good results cache as before.
   const revalidate = Math.max(1, Math.round(ttlMs / 1000));
-  const produce = unstable_cache(producer, [key, "music-v3"], { revalidate, tags: ["music"] });
+  const produce = process.env.MUSIC_NO_L2 === "1"
+    ? producer
+    : unstable_cache(producer, [key, "music-v3"], { revalidate, tags: ["music"] });
   const promise = Promise.resolve()
     .then(() => produce() as Promise<T>)
     .then(async (value) => {
@@ -282,6 +284,12 @@ export async function searchTracks(query: string, source: SearchSource): Promise
   const q = query.trim();
   if (!q) return { tracks: [], artists: [], albums: [], playlists: [], podcasts: [], total: 0 };
 
+  // Spotify manages its own caching — it must never run inside the generic
+  // cached() wrapper below: a producer that awaits a cached() call with its
+  // own key deadlocks on the in-flight promise (this hung every search for
+  // 60s+ and 504'd the deployed API).
+  if (source === "spotify") return searchSpotify(q);
+
   return cached(`search:${source}:${q.toLowerCase()}`, SEARCH_TTL, async () => {
     try {
       if (source === "soundcloud") {
@@ -300,37 +308,6 @@ export async function searchTracks(query: string, source: SearchSource): Promise
         };
       }
 
-      if (source === "spotify") {
-        // THE ENGINE FIRST — remote Railway host when configured (warm,
-        // ~1-2s), then the in-lambda engine. Only ENGINE results are
-        // cached: a mirror/backup answer captured during an engine blip
-        // must never outlive the blip in the cache.
-        const key = `search:spotify:${q.toLowerCase()}`;
-        const viaEngine = await cached(key, SEARCH_TTL, async () => {
-          const r = await searchSpotifyViaEngine(q);
-          // Throwing keeps the null out of the cache — the next request
-          // retries the engine instead of serving stale fallback rows.
-          if (!r) throw new Error("engine unavailable");
-          return r;
-        }).catch(() => null);
-        if (viaEngine) {
-          for (const t of viaEngine.tracks) noteSuggestion(t.title);
-          for (const a of viaEngine.albums) noteSuggestion(a.title);
-          for (const a of viaEngine.artists) noteSuggestion(a.name);
-          return viaEngine;
-        }
-        const raw = await callUpstream({ endpoint: "search.spotify", params: { query: q }, timeoutMs: 8000 });
-        const tracks = normalizeSpotifyTracks(raw);
-        // The upstream sends no releaseDate/albumType — fill them from
-        // iTunes so "New ·" and real EP/Single/Album labels work.
-        await decorateWithItunesReleases(tracks);
-        for (const t of tracks) noteSuggestion(t.title);
-        // Group the tracks into real albums so source tabs (and searchAll)
-        // all surface clickable album cards backed by playable tracks.
-        const albums = albumsFromTracks(tracks);
-        return { tracks, albums, artists: [], playlists: [], podcasts: [], total: tracks.length + albums.length };
-      }
-
       const raw = await callUpstream({ endpoint: "search.youtube", params: { query: q }, timeoutMs: 8000 });
       const tracks = normalizeYouTubeTracks(raw);
       for (const t of tracks) noteSuggestion(t.title);
@@ -338,15 +315,56 @@ export async function searchTracks(query: string, source: SearchSource): Promise
     } catch (err) {
       // Primary unavailable (down or switched off) — run on the backup
       // engine, which returns relevance-ranked full-track results.
-      const tracks = await backupSearchTracks(q, source === "spotify");
+      const tracks = await backupSearchTracks(q, false);
       for (const t of tracks) noteSuggestion(t.title);
-      if (source === "spotify") {
-        const albums = albumsFromTracks(tracks);
-        return { tracks, albums, artists: [], playlists: [], podcasts: [], total: tracks.length + albums.length };
-      }
       return { tracks, artists: [], albums: [], playlists: [], podcasts: [], total: tracks.length };
     }
   });
+}
+
+/**
+ * Spotify-source search. Only ENGINE answers are cached: a mirror or backup
+ * answer captured during an engine blip must never outlive the blip in the
+ * Next Data Cache (it survives redeploys and would poison the query for the
+ * whole TTL). The engine result lives under its own key — `search:spotify-engine:`
+ * — which is deliberately DIFFERENT from the key any enclosing producer may
+ * hold, so this can never await its own in-flight promise.
+ */
+async function searchSpotify(q: string): Promise<SearchResults> {
+  const viaEngine = await cached(
+    `search:spotify-engine:${q.toLowerCase()}`,
+    SEARCH_TTL,
+    async () => {
+      const r = await searchSpotifyViaEngine(q);
+      // Throwing keeps the null out of the cache — the next request
+      // retries the engine instead of serving stale fallback rows.
+      if (!r) throw new Error("engine unavailable");
+      return r;
+    },
+  ).catch(() => null);
+  if (viaEngine) {
+    for (const t of viaEngine.tracks) noteSuggestion(t.title);
+    for (const a of viaEngine.albums) noteSuggestion(a.title);
+    for (const a of viaEngine.artists) noteSuggestion(a.name);
+    return viaEngine;
+  }
+  try {
+    const raw = await callUpstream({ endpoint: "search.spotify", params: { query: q }, timeoutMs: 8000 });
+    const tracks = normalizeSpotifyTracks(raw);
+    // The upstream sends no releaseDate/albumType — fill them from
+    // iTunes so "New ·" and real EP/Single/Album labels work.
+    await decorateWithItunesReleases(tracks);
+    for (const t of tracks) noteSuggestion(t.title);
+    // Group the tracks into real albums so source tabs (and searchAll)
+    // all surface clickable album cards backed by playable tracks.
+    const albums = albumsFromTracks(tracks);
+    return { tracks, albums, artists: [], playlists: [], podcasts: [], total: tracks.length + albums.length };
+  } catch {
+    const tracks = await backupSearchTracks(q, true);
+    for (const t of tracks) noteSuggestion(t.title);
+    const albums = albumsFromTracks(tracks);
+    return { tracks, albums, artists: [], playlists: [], podcasts: [], total: tracks.length + albums.length };
+  }
 }
 
 /** Fan out across every configured source and merge the results. */
