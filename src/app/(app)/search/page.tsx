@@ -394,17 +394,40 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
   };
 
   // Same scoring idea as the server: exact match > includes > loose.
+  // Split-match: "water tyla" must rank the real "Water" by Tyla above
+  // covers whose long titles happen to contain both words.
   const rel = (text: string) => {
     const t = text.toLowerCase();
     const n = q.toLowerCase();
     if (!text) return 0;
-    if (t === n) return 130;
-    if (t.startsWith(n) || t.endsWith(n)) return 110;
-    if (t.includes(n)) return 90;
-    const tokens = n.split(/\s+/).filter(Boolean);
-    if (tokens.length > 1 && tokens.every((tk) => t.includes(tk))) return 70;
+    const nt = t.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+    const nn = n.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+    if (!nt || !nn) return 0;
+    if (nt === nn) return 130;
+    // Long uploader titles that merely start with the query get demoted
+    // below the split-match score so the real song wins.
+    const extra = nt.split("-").filter(Boolean).length - nn.split("-").filter(Boolean).length;
+    if (nt.startsWith(nn) || nt.endsWith(nn)) return extra <= 2 ? 110 : 95;
+    if (nt.includes(nn)) return 90;
+    const tokens = nn.split("-").filter(Boolean);
+    if (tokens.length > 1 && tokens.every((tk) => nt.includes(tk))) return 70;
     return 10;
   };
+  const qTokens = q.toLowerCase().split(/\s+/).filter((w) => w.length >= 2);
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const splitScore = (title: string, artist: string) => {
+    if (!qTokens.length) return 0;
+    const ts = norm(title);
+    const as = norm(artist);
+    const missAllowed = qTokens.length > 3 ? 1 : 0;
+    const covered = qTokens.filter((tk) => ts.includes(tk) || as.includes(tk)).length;
+    if (qTokens.length - covered > missAllowed) return 0;
+    if (ts === norm(q)) return 120;
+    if (qTokens.some((tk) => ts === tk)) return 110;
+    return 100;
+  };
+  const rowScore = (title: string, artist: string, album?: string) =>
+    Math.max(rel(title), rel(artist) - 5, rel(album ?? "") - 5, splitScore(title, artist));
 
   let order = 0;
   for (const t of tracks.slice(0, 25)) {
@@ -415,7 +438,7 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
       subtitle: `${isNew(t.releaseDate) ? "New · " : ""}Song · ${t.artist}`,
       artwork: t.artwork,
       track: t,
-      score: Math.max(rel(t.title), rel(t.artist) - 5, rel(t.album ?? "") - 5),
+      score: rowScore(t.title, t.artist, t.album),
       order: order++,
     });
   }
@@ -429,7 +452,7 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
       // Sets we could not open in-app (SoundCloud releases) carry their own
       // URL — link out rather than dead-ending on an album route.
       href: al.url ?? `/albums/${al.id}`,
-      score: Math.max(rel(al.title), rel(al.artist) - 5),
+      score: rowScore(al.title, al.artist),
       order: order++,
     });
   }
@@ -455,7 +478,7 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
       subtitle: `Playlist · ${pl.owner}`,
       artwork: pl.artwork,
       href: `/playlists/${pl.id}`,
-      score: Math.max(rel(pl.name), rel(pl.owner) - 5),
+      score: rowScore(pl.name, pl.owner),
       order: order++,
     });
   }

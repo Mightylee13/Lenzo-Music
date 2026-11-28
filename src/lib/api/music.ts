@@ -157,7 +157,12 @@ function relevance(text: string, q: string): number {
   const n = slug(q);
   if (!t || !n) return 0;
   if (t === n) return 130;
-  if (t.startsWith(n) || t.endsWith(n)) return 110;
+  // Uploader titles like "water - Tyla (Victoria Secret Live show
+  // version) cover" start with the whole query and used to outrank the
+  // real song. A clean prefix/suffix (≤2 extra words) stays strong; a
+  // long one is demoted below the split-match score.
+  const extra = t.split("-").filter(Boolean).length - n.split("-").filter(Boolean).length;
+  if (t.startsWith(n) || t.endsWith(n)) return extra <= 2 ? 110 : 95;
   if (t.includes(n)) return 90;
   const tokens = n.split("-").filter(Boolean);
   if (tokens.length > 1 && tokens.every((tk) => t.includes(tk))) return 70;
@@ -395,6 +400,25 @@ export async function searchAll(query: string): Promise<SearchResults> {
     // whose name matches the query on top of that survive.
     // Relevance ranking — exact title first, then artist-name matches,
     // then loose includes; stable on ties (provider order preserved).
+    // Split-match scoring: "water tyla" must rank the REAL "Water" by
+    // Tyla (title hits one token, artist the other) above covers whose
+    // long titles happen to contain both words.
+    const qn = slug(q);
+    const qTokens = qn.split("-").filter((w) => w.length >= 2);
+    const missAllowed = qTokens.length > 3 ? 1 : 0;
+    const splitScore = (t: Track) => {
+      if (!qTokens.length) return 0;
+      const ts = slug(t.title);
+      const as = slug(t.artist);
+      const covered = qTokens.filter((tk) => ts.includes(tk) || as.includes(tk)).length;
+      if (qTokens.length - covered > missAllowed) return 0;
+      // Every query token is covered by title+artist — that is what the
+      // user searched for. A title that is exactly a query token ("Water"
+      // for "water tyla") is the real song, not a cover essay.
+      if (ts === qn) return 120;
+      if (qTokens.some((tk) => ts === tk)) return 110;
+      return 100;
+    };
     const scored = collapsed.map((t, i) => ({
       t,
       i,
@@ -402,6 +426,7 @@ export async function searchAll(query: string): Promise<SearchResults> {
         relevance(t.title, q),
         relevance(t.artist, q) - 5,
         relevance(t.album ?? "", q) - 5,
+        splitScore(t),
       ),
     }));
 
@@ -412,7 +437,6 @@ export async function searchAll(query: string): Promise<SearchResults> {
     // that share a title.
     const rankedAlbums = mergeAlbums(albumsFromTracks(scored.map((s) => s.t)), albums);
 
-    const qn = slug(q);
     const profileArtists = artists.filter((a) => {
       const an = slug(a.name);
       return an && (an === qn || an.includes(qn) || qn.includes(an));
