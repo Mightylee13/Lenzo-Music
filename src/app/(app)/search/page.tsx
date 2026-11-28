@@ -403,7 +403,9 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
     const nt = t.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     const nn = n.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     if (!nt || !nn) return 0;
-    if (nt === nn) return 130;
+    // Title equal to a multi-token query is usually a spam re-upload —
+    // the real song outranks it via split-match.
+    if (nt === nn) return nn.split("-").length > 1 ? 120 : 130;
     // Long uploader titles that merely start with the query get demoted
     // below the split-match score so the real song wins.
     const extra = nt.split("-").filter(Boolean).length - nn.split("-").filter(Boolean).length;
@@ -422,8 +424,10 @@ function SearchResultsView({ results, query, tracks }: { results: SearchResults;
     const missAllowed = qTokens.length > 3 ? 1 : 0;
     const covered = qTokens.filter((tk) => ts.includes(tk) || as.includes(tk)).length;
     if (qTokens.length - covered > missAllowed) return 0;
+    // Title exactly one token + artist carrying the rest = the real song;
+    // a title equal to the whole query is usually a spam re-upload.
+    if (qTokens.some((tk) => ts === tk)) return 125;
     if (ts === norm(q)) return 120;
-    if (qTokens.some((tk) => ts === tk)) return 110;
     return 100;
   };
   const rowScore = (title: string, artist: string, album?: string) =>

@@ -172,7 +172,10 @@ function relevance(text: string, q: string): number {
   const t = slug(text);
   const n = slug(q);
   if (!t || !n) return 0;
-  if (t === n) return 130;
+  // A title equal to a MULTI-token query ("Water TylA" for "water tyla")
+  // is usually a spam re-upload that absorbed the artist name — the real
+  // song ranks above it via split-match (title + artist tokens).
+  if (t === n) return n.split("-").length > 1 ? 120 : 130;
   // Uploader titles like "water - Tyla (Victoria Secret Live show
   // version) cover" start with the whole query and used to outrank the
   // real song. A clean prefix/suffix (≤2 extra words) stays strong; a
@@ -296,9 +299,23 @@ export async function searchTracks(query: string, source: SearchSource): Promise
 
       if (source === "spotify") {
         // THE ENGINE FIRST — remote Railway host when configured (warm,
-        // ~1-2s), then the in-lambda engine, then the mirror API.
-        const viaEngine = await searchSpotifyViaEngine(q);
-        if (viaEngine) return viaEngine;
+        // ~1-2s), then the in-lambda engine. Only ENGINE results are
+        // cached: a mirror/backup answer captured during an engine blip
+        // must never outlive the blip in the cache.
+        const key = `search:spotify:${q.toLowerCase()}`;
+        const viaEngine = await cached(key, SEARCH_TTL, async () => {
+          const r = await searchSpotifyViaEngine(q);
+          // Throwing keeps the null out of the cache — the next request
+          // retries the engine instead of serving stale fallback rows.
+          if (!r) throw new Error("engine unavailable");
+          return r;
+        }).catch(() => null);
+        if (viaEngine) {
+          for (const t of viaEngine.tracks) noteSuggestion(t.title);
+          for (const a of viaEngine.albums) noteSuggestion(a.title);
+          for (const a of viaEngine.artists) noteSuggestion(a.name);
+          return viaEngine;
+        }
         const raw = await callUpstream({ endpoint: "search.spotify", params: { query: q } });
         const tracks = normalizeSpotifyTracks(raw);
         // The upstream sends no releaseDate/albumType — fill them from
@@ -432,10 +449,12 @@ export async function searchAll(query: string): Promise<SearchResults> {
       const covered = qTokens.filter((tk) => ts.includes(tk) || as.includes(tk)).length;
       if (qTokens.length - covered > missAllowed) return 0;
       // Every query token is covered by title+artist — that is what the
-      // user searched for. A title that is exactly a query token ("Water"
-      // for "water tyla") is the real song, not a cover essay.
+      // user searched for. A title that is exactly one query token
+      // ("Water" for "water tyla") with the artist carrying the rest is
+      // the REAL song; a title equal to the WHOLE query ("Water TylA")
+      // is typically a spam re-upload and ranks just below it.
+      if (qTokens.some((tk) => ts === tk)) return 125;
       if (ts === qn) return 120;
-      if (qTokens.some((tk) => ts === tk)) return 110;
       return 100;
     };
     const scored = collapsed.map((t, i) => ({
