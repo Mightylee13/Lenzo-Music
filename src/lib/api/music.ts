@@ -398,7 +398,7 @@ export async function searchAll(query: string): Promise<SearchResults> {
     };
     const keptCatalogue: Track[] = [];
     const collapsed: Track[] = [];
-    for (const t of collapsed) {
+    for (const t of deduped) {
       if (t.source === "spotify") {
         keptCatalogue.push(t);
         collapsed.push(t);
