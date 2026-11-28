@@ -314,7 +314,11 @@ export async function searchAll(query: string): Promise<SearchResults> {
     const artists: SearchResults["artists"] = [];
     const albums: SearchResults["albums"] = [];
 
-    for (const result of settled) {
+    // Spotify (engine) rows first: their artist names come from the real
+    // catalogue, and the stable dedupe below gives first-wins — so the
+    // same recording uploaded elsewhere (SoundCloud/YouTube uploader
+    // channels) can never knock the true artist name off a row.
+    for (const result of [settled[1], settled[0], settled[2]]) {
       if (result.status !== "fulfilled") continue;
       tracks.push(...result.value.tracks);
       artists.push(...result.value.artists);
@@ -331,13 +335,44 @@ export async function searchAll(query: string): Promise<SearchResults> {
       return true;
     });
 
+    // Same-recording collapse: non-catalogue rows whose artist is really
+    // an uploader channel ("NaijaVibes", "X TV") used to surface the song
+    // a second time with that name under it. A row that shares a title
+    // with a kept catalogue row, is within ~4s of its length, and has a
+    // related artist (one name containing the other or a shared word) is
+    // the same recording — drop it, the catalogue row already represents it.
+    const artistWords = (name: string) => slug(name).split("-").filter((w) => w.length >= 3);
+    const artistsRelated = (a: string, b: string) => {
+      const as = slug(a);
+      const bs = slug(b);
+      if (!as || !bs) return false;
+      if (as === bs || as.includes(bs) || bs.includes(as)) return true;
+      return artistWords(a).some((w) => artistWords(b).includes(w));
+    };
+    const keptCatalogue: Track[] = [];
+    const collapsed: Track[] = [];
+    for (const t of collapsed) {
+      if (t.source === "spotify") {
+        keptCatalogue.push(t);
+        collapsed.push(t);
+        continue;
+      }
+      const sameRecording = keptCatalogue.some(
+        (k) =>
+          slug(k.title) === slug(t.title) &&
+          Math.abs((k.duration ?? 0) - (t.duration ?? 0)) <= 4 &&
+          artistsRelated(k.artist, t.artist),
+      );
+      if (!sameRecording) collapsed.push(t);
+    }
+
     // Artists derived from the actual song hits — far more reliable than
     // trusting SoundCloud profile results, which include fan accounts,
     // repost channels and unrelated uploaders. Only SoundCloud profiles
     // whose name matches the query on top of that survive.
     // Relevance ranking — exact title first, then artist-name matches,
     // then loose includes; stable on ties (provider order preserved).
-    const scored = deduped.map((t, i) => ({
+    const scored = collapsed.map((t, i) => ({
       t,
       i,
       score: Math.max(
@@ -362,7 +397,7 @@ export async function searchAll(query: string): Promise<SearchResults> {
 
     const scores = new Map<string, number>();
     const derived = new Map<string, SearchResults["artists"][number]>();
-    for (const t of deduped) {
+    for (const t of collapsed) {
       const names = t.artist?.split(",").map((n) => n.trim()).filter(Boolean) ?? [];
       for (const [i, name] of names.entries()) {
         const id = `ar_${slug(name)}`;

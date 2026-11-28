@@ -254,7 +254,11 @@ export function normalizeYouTubeTracks(raw: unknown, source: MusicSource = "yout
 
   for (const item of list) {
     const title = str(item.title, "Unknown track");
-    const channel = str(item.channel, "Unknown artist");
+    let channel = str(item.channel, "Unknown artist");
+    // "Artist - Topic" channels ARE the official artist — the suffix is
+    // YouTube's auto-generated naming, not a feat. Strip it so the row
+    // shows the real name instead of platform boilerplate.
+    channel = channel.replace(/\s*-\s*topic\s*$/i, "").trim() || channel;
     const url = str(item.url);
     const videoId = str(item.videoId);
     if (!url && !videoId) continue;
