@@ -48,7 +48,12 @@ interface CacheEntry<T> {
 
 const store = new Map<string, CacheEntry<unknown>>();
 
-function cached<T>(key: string, ttlMs: number, producer: () => Promise<T>): Promise<T> {
+function cached<T>(
+  key: string,
+  ttlMs: number,
+  producer: () => Promise<T>,
+  opts: { skipIf?: (v: T) => boolean } = {},
+): Promise<T> {
   const hit = store.get(key);
   if (hit && hit.expires > Date.now()) return Promise.resolve(hit.value as T);
   // Share one upstream request between concurrent identical calls
@@ -60,11 +65,22 @@ function cached<T>(key: string, ttlMs: number, producer: () => Promise<T>): Prom
   // which made the deployed app re-fetch every search and re-convert every
   // song from scratch. The Data Cache survives across invocations and
   // regions, so repeat searches/requests come back in milliseconds.
+  //
+  // skipIf: when the produced value is degraded (e.g. an all-source
+  // search that lost the catalogue leg to an engine blip), it must NOT
+  // be kept — the Data Cache survives redeploys, so a cover-only result
+  // captured during a 90s outage would otherwise poison that query for
+  // the whole TTL. The degraded value is re-produced fresh (outside the
+  // Data Cache) and stored nowhere; good results cache as before.
   const revalidate = Math.max(1, Math.round(ttlMs / 1000));
-  const produce = unstable_cache(producer, [key, "music-v2"], { revalidate, tags: ["music"] });
+  const produce = unstable_cache(producer, [key, "music-v3"], { revalidate, tags: ["music"] });
   const promise = Promise.resolve()
     .then(() => produce() as Promise<T>)
-    .then((value) => {
+    .then(async (value) => {
+      if (opts.skipIf?.(value)) {
+        inflight.delete(key);
+        return producer();
+      }
       store.set(key, { value, expires: Date.now() + ttlMs });
       inflight.delete(key);
       return value;
@@ -318,7 +334,10 @@ export async function searchAll(query: string): Promise<SearchResults> {
   const q = query.trim();
   if (!q) return { tracks: [], artists: [], albums: [], playlists: [], podcasts: [], total: 0 };
 
-  return cached(`search:all:${q.toLowerCase()}`, SEARCH_TTL, async () => {
+  return cached(
+    `search:all:${q.toLowerCase()}`,
+    SEARCH_TTL,
+    async () => {
     const settled = await Promise.allSettled([
       searchTracks(q, "soundcloud"),
       searchTracks(q, "spotify"),
@@ -552,7 +571,11 @@ export async function searchAll(query: string): Promise<SearchResults> {
       podcasts: [],
       total: ranked.length + uniqueArtists.length + rankedAlbums.length,
     };
-  });
+    },
+    // A merge with zero catalogue rows means the engine leg failed —
+    // serve it once but leave it uncached so the next request retries.
+    { skipIf: (r) => !r.tracks.some((t) => t.source === "spotify") },
+  );
 }
 
 /** Lightweight type-ahead suggestions (cheap, cached aggressively). */
