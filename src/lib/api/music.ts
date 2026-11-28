@@ -265,8 +265,9 @@ export async function searchSpotifyViaEngine(q: string): Promise<SearchResults |
     try {
       const t0 = Date.now();
       // Cold-lambda bootstrap (TOTP + hash discovery) can run 20-40s and
-      // blow the route's 60s budget together with the other legs — cap it.
-      const found = await withTimeout(engineSearchRaw(q, 24), 20000, "in-lambda engine window exceeded");
+      // blow the route's 60s budget together with the other legs — cap it
+      // tight; the remote engine is the path that matters anyway.
+      const found = await withTimeout(engineSearchRaw(q, 24), 12000, "in-lambda engine window exceeded");
       if (engineFoundSomething(found)) return buildEngineSearchResults(found, "engine", t0, q);
     } catch (engineErr) {
       console.error(
@@ -284,7 +285,7 @@ export async function searchTracks(query: string, source: SearchSource): Promise
   return cached(`search:${source}:${q.toLowerCase()}`, SEARCH_TTL, async () => {
     try {
       if (source === "soundcloud") {
-        const raw = await callUpstream({ endpoint: "search.soundcloud", params: { query: q } });
+        const raw = await callUpstream({ endpoint: "search.soundcloud", params: { query: q }, timeoutMs: 8000 });
         const { tracks, artists, albums } = normalizeSoundCloudTracks(raw);
         for (const t of tracks) noteSuggestion(t.title);
         for (const a of artists) noteSuggestion(a.name);
@@ -318,7 +319,7 @@ export async function searchTracks(query: string, source: SearchSource): Promise
           for (const a of viaEngine.artists) noteSuggestion(a.name);
           return viaEngine;
         }
-        const raw = await callUpstream({ endpoint: "search.spotify", params: { query: q } });
+        const raw = await callUpstream({ endpoint: "search.spotify", params: { query: q }, timeoutMs: 8000 });
         const tracks = normalizeSpotifyTracks(raw);
         // The upstream sends no releaseDate/albumType — fill them from
         // iTunes so "New ·" and real EP/Single/Album labels work.
@@ -330,7 +331,7 @@ export async function searchTracks(query: string, source: SearchSource): Promise
         return { tracks, albums, artists: [], playlists: [], podcasts: [], total: tracks.length + albums.length };
       }
 
-      const raw = await callUpstream({ endpoint: "search.youtube", params: { query: q } });
+      const raw = await callUpstream({ endpoint: "search.youtube", params: { query: q }, timeoutMs: 8000 });
       const tracks = normalizeYouTubeTracks(raw);
       for (const t of tracks) noteSuggestion(t.title);
       return { tracks, artists: [], albums: [], playlists: [], podcasts: [], total: tracks.length };

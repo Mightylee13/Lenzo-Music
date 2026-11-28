@@ -923,4 +923,10 @@ process.on("unhandledRejection", (err) => console.error("[engine] unhandled reje
 server.listen(PORT, "0.0.0.0", () => {
   fsp.mkdir(AUDIO_DIR, { recursive: true }).catch(() => {});
   console.log(`[engine] listening on :${PORT}${TOKEN ? " (token required)" : ""}`);
+  // Warm the Spotify session + persisted-query hash NOW so the first
+  // search after a restart answers in ~1s instead of ~15-20s.
+  getAuth(true)
+    .then(() => discoverHash())
+    .then(() => console.log("[engine] spotify session warmed"))
+    .catch((err) => console.error(`[engine] warmup failed: ${err instanceof Error ? err.message : err} — will retry lazily`));
 });
