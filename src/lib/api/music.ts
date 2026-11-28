@@ -218,13 +218,23 @@ function engineFoundSomething(found: EngineSearchOutcome): boolean {
 export async function searchSpotifyViaEngine(q: string): Promise<SearchResults | null> {
   // REMOTE engine host first (warm, ~1-2s) — the in-lambda engine cold
   // boot (TOTP + hash discovery, ~20s measured) is the slow fallback.
+  // One retry after a short pause: Railway redeploys drop the host for
+  // a minute, and without the retry a search landing in that window
+  // lost the whole real-artist catalogue and shipped covers instead.
   if (REMOTE_ENGINE) {
-    try {
-      const t0 = Date.now();
-      const found = await remoteEngineSearch(q, 24);
-      if (engineFoundSomething(found)) return buildEngineSearchResults(found, "remote-engine", t0, q);
-    } catch (err) {
-      console.error(`[search] remote engine failed q=${q}: ${err instanceof Error ? err.message : err} — in-lambda engine next`);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const t0 = Date.now();
+        const found = await remoteEngineSearch(q, 24);
+        if (engineFoundSomething(found)) return buildEngineSearchResults(found, "remote-engine", t0, q);
+        break; // engine answered, genuinely no data — stop retrying
+      } catch (err) {
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        console.error(`[search] remote engine failed x2 q=${q}: ${err instanceof Error ? err.message : err} — in-lambda engine next`);
+      }
     }
   }
   if (!isPrimaryDisabled()) {
@@ -313,6 +323,19 @@ export async function searchAll(query: string): Promise<SearchResults> {
     const tracks: Track[] = [];
     const artists: SearchResults["artists"] = [];
     const albums: SearchResults["albums"] = [];
+
+    // If the Spotify leg died (engine blip, mirror down), the merge would
+    // rank SoundCloud covers with uploader names over nothing — retry it
+    // once before merging so real catalogue rows get their chance.
+    const spotifyLeg = settled[1];
+    const spotifyEmpty = spotifyLeg.status === "rejected" || (spotifyLeg.status === "fulfilled" && spotifyLeg.value.tracks.length === 0);
+    if (spotifyEmpty) {
+      try {
+        settled[1] = { status: "fulfilled", value: await searchTracks(q, "spotify") };
+      } catch {
+        /* both attempts failed — merge whatever the other sources found */
+      }
+    }
 
     // Spotify (engine) rows first: their artist names come from the real
     // catalogue, and the stable dedupe below gives first-wins — so the
