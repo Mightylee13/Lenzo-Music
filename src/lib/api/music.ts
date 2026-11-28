@@ -264,7 +264,9 @@ export async function searchSpotifyViaEngine(q: string): Promise<SearchResults |
   if (!isPrimaryDisabled()) {
     try {
       const t0 = Date.now();
-      const found = await engineSearchRaw(q, 24);
+      // Cold-lambda bootstrap (TOTP + hash discovery) can run 20-40s and
+      // blow the route's 60s budget together with the other legs — cap it.
+      const found = await withTimeout(engineSearchRaw(q, 24), 20000, "in-lambda engine window exceeded");
       if (engineFoundSomething(found)) return buildEngineSearchResults(found, "engine", t0, q);
     } catch (engineErr) {
       console.error(
